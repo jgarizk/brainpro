@@ -53,11 +53,6 @@ pub fn execute(name: &str, args: Value, root: &Path, bash_config: &BashConfig) -
     }
 }
 
-#[allow(dead_code)]
-pub fn requires_permission(name: &str) -> bool {
-    matches!(name, "Write" | "Edit" | "Bash")
-}
-
 fn validate_path(path: &str, root: &Path) -> Result<std::path::PathBuf, Value> {
     if path.starts_with('/') {
         return Err(
