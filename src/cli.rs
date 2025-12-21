@@ -1,6 +1,6 @@
 use crate::{
-    agent, backend::BackendRegistry, config::Config, config::PermissionMode, policy::PolicyEngine,
-    transcript::Transcript, Args,
+    agent, backend::BackendRegistry, config::Config, config::PermissionMode,
+    mcp::manager::McpManager, policy::PolicyEngine, transcript::Transcript, Args,
 };
 use anyhow::Result;
 use rustyline::error::ReadlineError;
@@ -18,6 +18,7 @@ pub struct Context {
     pub backends: RefCell<BackendRegistry>,
     pub current_skill: RefCell<String>,
     pub policy: RefCell<PolicyEngine>,
+    pub mcp_manager: RefCell<McpManager>,
 }
 
 pub fn run_once(ctx: &Context, prompt: &str) -> Result<()> {
@@ -85,6 +86,11 @@ fn handle_command(ctx: &Context, cmd: &str, messages: &mut Vec<serde_json::Value
             println!("  /permissions rm allow|ask|deny <index>");
             println!("Context:");
             println!("  /context        - show context usage stats");
+            println!("MCP (Model Context Protocol):");
+            println!("  /mcp list              - list configured MCP servers");
+            println!("  /mcp connect <name>    - connect to an MCP server");
+            println!("  /mcp disconnect <name> - disconnect from an MCP server");
+            println!("  /mcp tools <name>      - list tools from an MCP server");
         }
         "/session" => {
             println!("Session: {}", ctx.session_id);
@@ -196,6 +202,9 @@ fn handle_command(ctx: &Context, cmd: &str, messages: &mut Vec<serde_json::Value
             println!("  Max: {} chars", max_chars);
             println!("  Usage: {:.1}%", usage_pct);
         }
+        "/mcp" => {
+            handle_mcp_command(ctx, if parts.len() > 1 { parts[1] } else { "" });
+        }
         _ => println!("Unknown command: {}", parts[0]),
     }
     false
@@ -290,6 +299,97 @@ fn handle_permissions_command(ctx: &Context, args: &str) {
             println!("  /permissions                    - show current rules");
             println!("  /permissions add allow|ask|deny \"pattern\"");
             println!("  /permissions rm allow|ask|deny <index>");
+        }
+    }
+}
+
+fn handle_mcp_command(ctx: &Context, args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied() {
+        Some("list") | None => {
+            let manager = ctx.mcp_manager.borrow();
+            let servers = manager.list_servers();
+            if servers.is_empty() {
+                println!("No MCP servers configured.");
+                println!("Add servers to .yo/config.toml under [mcp.servers.<name>]");
+            } else {
+                println!("MCP Servers:");
+                for (name, config, connected) in servers {
+                    let status = if connected { "[connected]" } else { "" };
+                    let enabled = if config.enabled { "" } else { " (disabled)" };
+                    println!("  {} - {}{} {}", name, config.command, enabled, status);
+                }
+            }
+        }
+        Some("connect") if parts.len() >= 2 => {
+            let name = parts[1];
+            let mut manager = ctx.mcp_manager.borrow_mut();
+            match manager.connect(name, &ctx.root) {
+                Ok((pid, tool_count)) => {
+                    println!("Connected to MCP server: {}", name);
+                    println!("  PID: {}", pid);
+                    println!("  Tools discovered: {}", tool_count);
+                    // Log to transcript
+                    let config = ctx.config.borrow();
+                    if let Some(server_config) = config.mcp.servers.get(name) {
+                        let _ = ctx.transcript.borrow_mut().mcp_server_start(
+                            name,
+                            &server_config.command,
+                            pid,
+                        );
+                    }
+                    let _ = ctx.transcript.borrow_mut().mcp_initialize_ok(name);
+                    let _ = ctx.transcript.borrow_mut().mcp_tools_list(name, tool_count);
+                }
+                Err(e) => {
+                    eprintln!("Failed to connect to {}: {}", name, e);
+                    let _ = ctx
+                        .transcript
+                        .borrow_mut()
+                        .mcp_initialize_err(name, &e.to_string());
+                }
+            }
+        }
+        Some("disconnect") if parts.len() >= 2 => {
+            let name = parts[1];
+            let mut manager = ctx.mcp_manager.borrow_mut();
+            match manager.disconnect(name) {
+                Ok(()) => {
+                    println!("Disconnected from MCP server: {}", name);
+                    let _ = ctx.transcript.borrow_mut().mcp_server_stop(name);
+                }
+                Err(e) => {
+                    eprintln!("Failed to disconnect from {}: {}", name, e);
+                }
+            }
+        }
+        Some("tools") if parts.len() >= 2 => {
+            let name = parts[1];
+            let manager = ctx.mcp_manager.borrow();
+            let tools = manager.get_server_tools(name);
+            if tools.is_empty() {
+                if manager.is_connected(name) {
+                    println!("Server {} has no tools.", name);
+                } else {
+                    println!(
+                        "Server {} is not connected. Use '/mcp connect {}'",
+                        name, name
+                    );
+                }
+            } else {
+                println!("Tools from {}:", name);
+                for tool in tools {
+                    println!("  {} - {}", tool.full_name, tool.description);
+                }
+            }
+        }
+        _ => {
+            println!("MCP commands:");
+            println!("  /mcp list              - list configured MCP servers");
+            println!("  /mcp connect <name>    - connect to an MCP server");
+            println!("  /mcp disconnect <name> - disconnect from an MCP server");
+            println!("  /mcp tools <name>      - list tools from an MCP server");
         }
     }
 }

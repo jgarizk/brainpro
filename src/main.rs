@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod context;
 mod llm;
+mod mcp;
 mod permissions;
 mod policy;
 mod tools;
@@ -200,6 +201,9 @@ fn main() -> Result<()> {
     let auto_yes = args.yes;
     let policy_engine = policy::PolicyEngine::new(cfg.permissions.clone(), print_mode, auto_yes);
 
+    // Create MCP manager from config
+    let mcp_manager = mcp::manager::McpManager::new(cfg.mcp.servers.clone());
+
     let ctx = cli::Context {
         args,
         root,
@@ -210,6 +214,7 @@ fn main() -> Result<()> {
         backends: RefCell::new(backends),
         current_skill: RefCell::new("default".to_string()),
         policy: RefCell::new(policy_engine),
+        mcp_manager: RefCell::new(mcp_manager),
     };
 
     if let Some(prompt) = &ctx.args.prompt {

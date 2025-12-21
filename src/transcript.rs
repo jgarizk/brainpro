@@ -145,4 +145,97 @@ impl Transcript {
     pub fn error(&mut self, message: &str) -> Result<()> {
         self.log("error", serde_json::json!({ "message": message }))
     }
+
+    /// Log MCP server start
+    pub fn mcp_server_start(&mut self, name: &str, command: &str, pid: u32) -> Result<()> {
+        self.log(
+            "mcp_server_start",
+            serde_json::json!({
+                "name": name,
+                "command": command,
+                "pid": pid,
+            }),
+        )
+    }
+
+    /// Log MCP initialize success
+    pub fn mcp_initialize_ok(&mut self, name: &str) -> Result<()> {
+        self.log("mcp_initialize_ok", serde_json::json!({ "name": name }))
+    }
+
+    /// Log MCP initialize error
+    pub fn mcp_initialize_err(&mut self, name: &str, error: &str) -> Result<()> {
+        self.log(
+            "mcp_initialize_err",
+            serde_json::json!({
+                "name": name,
+                "error": error,
+            }),
+        )
+    }
+
+    /// Log MCP tools list discovery
+    pub fn mcp_tools_list(&mut self, name: &str, count: usize) -> Result<()> {
+        self.log(
+            "mcp_tools_list",
+            serde_json::json!({
+                "name": name,
+                "count": count,
+            }),
+        )
+    }
+
+    /// Log MCP tool call
+    pub fn mcp_tool_call(
+        &mut self,
+        server: &str,
+        tool: &str,
+        args: &serde_json::Value,
+    ) -> Result<()> {
+        self.log(
+            "mcp_tool_call",
+            serde_json::json!({
+                "name": server,
+                "tool": tool,
+                "args": args,
+            }),
+        )
+    }
+
+    /// Log MCP tool result
+    pub fn mcp_tool_result(
+        &mut self,
+        server: &str,
+        tool: &str,
+        ok: bool,
+        duration_ms: u64,
+        truncated: bool,
+    ) -> Result<()> {
+        self.log(
+            "mcp_tool_result",
+            serde_json::json!({
+                "name": server,
+                "tool": tool,
+                "ok": ok,
+                "duration_ms": duration_ms,
+                "truncated": truncated,
+            }),
+        )
+    }
+
+    /// Log MCP server stop
+    pub fn mcp_server_stop(&mut self, name: &str) -> Result<()> {
+        self.log("mcp_server_stop", serde_json::json!({ "name": name }))
+    }
+
+    /// Log MCP server died unexpectedly
+    pub fn mcp_server_died(&mut self, name: &str, exit_status: Option<i32>) -> Result<()> {
+        self.log(
+            "mcp_server_died",
+            serde_json::json!({
+                "name": name,
+                "exit_status": exit_status,
+            }),
+        )
+    }
 }

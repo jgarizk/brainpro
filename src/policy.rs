@@ -33,6 +33,7 @@ impl ToolCategory {
             "Read" | "Grep" | "Glob" => ToolCategory::ReadOnly,
             "Write" | "Edit" => ToolCategory::Mutation,
             "Bash" => ToolCategory::Execution,
+            _ if name.starts_with("mcp.") => ToolCategory::Execution, // MCP tools require permission
             _ => ToolCategory::Execution, // Unknown tools require permission
         }
     }
@@ -100,11 +101,24 @@ impl PolicyEngine {
     }
 
     /// Check if a rule pattern matches a tool call
-    /// Pattern format: "ToolName" or "ToolName(prefix:*)"
+    /// Pattern format: "ToolName" or "ToolName(prefix:*)" or "mcp.*" or "mcp.server.*"
     fn rule_matches(pattern: &str, tool: &str, arg: Option<&str>) -> bool {
         // Simple tool name match: "Write" matches all Write calls
         if pattern == tool {
             return true;
+        }
+
+        // MCP wildcard matching: "mcp.*" or "mcp.server.*"
+        // Pattern "mcp.*" matches any MCP tool (e.g., "mcp.echo.add")
+        // Pattern "mcp.echo.*" matches any tool from echo server (e.g., "mcp.echo.add", "mcp.echo.echo")
+        if pattern.ends_with(".*") && tool.starts_with("mcp.") {
+            let prefix = &pattern[..pattern.len() - 2]; // Remove ".*"
+            if let Some(remaining) = tool.strip_prefix(prefix) {
+                // Check that the match is at a dot boundary
+                if remaining.is_empty() || remaining.starts_with('.') {
+                    return true;
+                }
+            }
         }
 
         // Pattern with argument: "Bash(git diff:*)" or "Edit(src/lib.rs)"
@@ -433,5 +447,76 @@ mod tests {
         // rm -rf should be denied
         let (decision, _) = engine.decide("Bash", &json!({"command": "rm -rf /"}));
         assert_eq!(decision, Decision::Deny);
+    }
+
+    #[test]
+    fn test_mcp_wildcard_all() {
+        // Pattern "mcp.*" should match any MCP tool
+        assert!(PolicyEngine::rule_matches("mcp.*", "mcp.echo.add", None));
+        assert!(PolicyEngine::rule_matches("mcp.*", "mcp.echo.echo", None));
+        assert!(PolicyEngine::rule_matches("mcp.*", "mcp.git.status", None));
+        assert!(!PolicyEngine::rule_matches("mcp.*", "Write", None));
+        assert!(!PolicyEngine::rule_matches("mcp.*", "Bash", None));
+    }
+
+    #[test]
+    fn test_mcp_wildcard_server() {
+        // Pattern "mcp.echo.*" should match any tool from echo server
+        assert!(PolicyEngine::rule_matches(
+            "mcp.echo.*",
+            "mcp.echo.add",
+            None
+        ));
+        assert!(PolicyEngine::rule_matches(
+            "mcp.echo.*",
+            "mcp.echo.echo",
+            None
+        ));
+        assert!(!PolicyEngine::rule_matches(
+            "mcp.echo.*",
+            "mcp.git.status",
+            None
+        ));
+        assert!(!PolicyEngine::rule_matches(
+            "mcp.echo.*",
+            "mcp.echoserver.add",
+            None
+        )); // Partial match should fail
+    }
+
+    #[test]
+    fn test_mcp_tool_category() {
+        assert_eq!(
+            ToolCategory::from_tool_name("mcp.echo.add"),
+            ToolCategory::Execution
+        );
+        assert_eq!(
+            ToolCategory::from_tool_name("mcp.git.status"),
+            ToolCategory::Execution
+        );
+    }
+
+    #[test]
+    fn test_mcp_default_asks() {
+        let engine = default_engine();
+        // MCP tools should ask by default (since they're Execution category)
+        let (decision, _) = engine.decide("mcp.echo.add", &json!({}));
+        assert_eq!(decision, Decision::Ask);
+    }
+
+    #[test]
+    fn test_mcp_allow_wildcard() {
+        let mut config = PermissionsConfig::default();
+        config.allow.push("mcp.echo.*".to_string());
+        let engine = PolicyEngine::new(config, false, false);
+
+        // Tools from echo server should be allowed
+        let (decision, rule) = engine.decide("mcp.echo.add", &json!({}));
+        assert_eq!(decision, Decision::Allow);
+        assert_eq!(rule.as_deref(), Some("mcp.echo.*"));
+
+        // Tools from other servers should still ask
+        let (decision, _) = engine.decide("mcp.git.status", &json!({}));
+        assert_eq!(decision, Decision::Ask);
     }
 }

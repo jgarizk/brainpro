@@ -2,6 +2,7 @@ pub mod bash;
 pub mod edit;
 mod glob;
 mod grep;
+pub mod mcp_dispatch;
 mod read;
 mod write;
 

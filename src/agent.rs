@@ -45,7 +45,17 @@ pub fn run_turn(ctx: &Context, user_input: &str, messages: &mut Vec<Value>) -> R
 
     trace(ctx, "TARGET", &format!("{} (skill: {})", target, skill));
 
-    let tool_schemas = tools::schemas();
+    // Get built-in tool schemas and add MCP tools if any servers are connected
+    let mut tool_schemas = tools::schemas();
+    {
+        let mcp_manager = ctx.mcp_manager.borrow();
+        if mcp_manager.has_connected_servers() {
+            // Add MCP tools to the schema
+            for tool_def in mcp_manager.get_all_tools() {
+                tool_schemas.push(tool_def.to_openai_schema());
+            }
+        }
+    }
 
     // Use max_turns from CLI if provided, otherwise default
     let max_iterations = ctx.args.max_turns.unwrap_or(MAX_ITERATIONS);
@@ -159,7 +169,63 @@ pub fn run_turn(ctx: &Context, user_input: &str, messages: &mut Vec<Value>) -> R
             );
 
             let result = if allowed {
-                tools::execute(name, args.clone(), &ctx.root, &bash_config)?
+                if name.starts_with("mcp.") {
+                    // Execute MCP tool
+                    let start = std::time::Instant::now();
+                    let mut mcp_manager = ctx.mcp_manager.borrow_mut();
+
+                    // Log the MCP tool call
+                    let parts: Vec<&str> = name.splitn(3, '.').collect();
+                    let (server, tool_name) = if parts.len() == 3 {
+                        (parts[1], parts[2])
+                    } else {
+                        ("unknown", name.as_str())
+                    };
+                    let _ = ctx
+                        .transcript
+                        .borrow_mut()
+                        .mcp_tool_call(server, tool_name, &args);
+
+                    match tools::mcp_dispatch::execute(&mut mcp_manager, name, args.clone()) {
+                        Ok(result) => {
+                            let duration_ms = start.elapsed().as_millis() as u64;
+                            let truncated = result
+                                .get("truncated")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let ok = result.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
+                            let _ = ctx.transcript.borrow_mut().mcp_tool_result(
+                                server,
+                                tool_name,
+                                ok,
+                                duration_ms,
+                                truncated,
+                            );
+                            result
+                        }
+                        Err(e) => {
+                            let duration_ms = start.elapsed().as_millis() as u64;
+                            let _ = ctx.transcript.borrow_mut().mcp_tool_result(
+                                server,
+                                tool_name,
+                                false,
+                                duration_ms,
+                                false,
+                            );
+                            // Check if server died
+                            if let Some(exit_status) = mcp_manager.check_server_health(server) {
+                                let _ = ctx
+                                    .transcript
+                                    .borrow_mut()
+                                    .mcp_server_died(server, Some(exit_status));
+                            }
+                            json!({ "error": { "code": "mcp_error", "message": e.to_string() } })
+                        }
+                    }
+                } else {
+                    // Execute built-in tool
+                    tools::execute(name, args.clone(), &ctx.root, &bash_config)?
+                }
             } else {
                 let reason = match decision {
                     Decision::Deny => "Denied by policy",

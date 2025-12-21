@@ -56,6 +56,40 @@ pub struct BashConfig {
     pub max_output_bytes: Option<usize>,
 }
 
+/// Configuration for an MCP server
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default = "default_cwd")]
+    pub cwd: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub auto_start: bool,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_cwd() -> String {
+    ".".to_string()
+}
+
+fn default_timeout_ms() -> u64 {
+    30_000
+}
+
+/// MCP configuration section
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub servers: HashMap<String, McpServerConfig>,
+}
+
 /// Configuration for context management
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ContextConfig {
@@ -166,6 +200,8 @@ pub struct Config {
     pub bash: BashConfig,
     #[serde(default)]
     pub context: ContextConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 impl Config {
@@ -216,6 +252,7 @@ impl Config {
             permissions: PermissionsConfig::default(),
             bash: BashConfig::default(),
             context: ContextConfig::default(),
+            mcp: McpConfig::default(),
         }
     }
 
@@ -290,6 +327,11 @@ impl Config {
         // (since there's no Option wrapper, we check if they differ from defaults)
         // For simplicity, we just take the other's values if the other config was loaded
         self.context = other.context;
+
+        // Merge MCP servers
+        for (name, server) in other.mcp.servers {
+            self.mcp.servers.insert(name, server);
+        }
     }
 
     /// Resolve a skill to its target
