@@ -9,8 +9,9 @@ An open source, local agentic butler for software development. `yo` orchestrates
 - **Built-in tools** - Read, Write, Edit, Grep, Glob, Bash
 - **MCP integration** - Connect external tool servers via Model Context Protocol
 - **Subagents** - Delegate tasks to specialized agents with restricted tools
+- **Skill Packs** - Reusable instruction sets with tool restrictions (Claude Code compatible)
+- **Model Routing** - Automatic model selection based on task type
 - **Permission system** - Granular allow/ask/deny rules for tool access
-- **Skill routing** - Map named skills to specific model@backend targets
 - **Session transcripts** - JSONL audit logs of all interactions
 - **Context management** - Automatic compaction when conversation grows large
 
@@ -52,7 +53,7 @@ yo -p "refactor main.rs" --yes
 | `--mode` | Permission mode: default, acceptEdits, bypassPermissions |
 | `--max-turns` | Max agent iterations per turn (default: 12) |
 | `--trace` | Enable detailed tracing |
-| `--list-targets` | Show configured backends and skills |
+| `--list-targets` | Show configured backends and default target |
 
 ## REPL Commands
 
@@ -64,15 +65,17 @@ yo -p "refactor main.rs" --yes
 | `/session` | Show session ID and transcript path |
 | `/context` | Show context usage stats |
 | `/backends` | List configured backends |
-| `/skills` | List available skills |
-| `/skill [name]` | Get or set current skill |
-| `/target [model@backend]` | Override current target |
+| `/target [model@backend]` | Show or set current target |
 | `/mode [name]` | Get or set permission mode |
 | `/permissions` | Show permission rules |
 | `/permissions add [allow\|ask\|deny] "pattern"` | Add rule |
 | `/trace` | Toggle tracing |
 | `/agents` | List available subagents |
 | `/task <agent> <prompt>` | Run a subagent with the given prompt |
+| `/skillpacks` | List available skill packs |
+| `/skillpack use <name>` | Activate a skill pack |
+| `/skillpack drop <name>` | Deactivate a skill pack |
+| `/skillpack active` | List active skill packs |
 | `/mcp list` | List MCP servers |
 | `/mcp connect <name>` | Connect to MCP server |
 | `/mcp disconnect <name>` | Disconnect MCP server |
@@ -94,9 +97,7 @@ Configuration hierarchy (highest to lowest priority):
 base_url = "https://api.venice.ai/api/v1"
 api_key_env = "VENICE_API_KEY"
 
-[skills]
-default = "qwen3-235b-a22b-instruct-2507@venice"
-fast = "gpt-4o-mini@chatgpt"
+default_target = "qwen3-235b-a22b-instruct-2507@venice"
 
 [permissions]
 mode = "default"
@@ -116,6 +117,11 @@ auto_compact_enabled = true
 command = "/path/to/mcp-calc"
 args = []
 auto_start = false
+
+[model_routing.routes]
+planning = "qwen3-235b-a22b-instruct-2507@venice"
+coding = "claude-3-5-sonnet-latest@claude"
+exploration = "gpt-4o-mini@chatgpt"
 ```
 
 See `example-yo.toml` for complete reference.
@@ -162,8 +168,7 @@ You are Scout, a read-only exploration agent.
 Use Glob to find files, Grep to search, Read to examine.
 """
 
-# Optional: override skill or target
-# skill = "fast"
+# Optional: override target for this agent
 # target = "gpt-4o-mini@chatgpt"
 ```
 
@@ -199,6 +204,87 @@ The main agent can delegate using the `Task` tool:
 - Permission mode is clamped to parent's mode (subagent cannot exceed parent permissions)
 - Tool access is restricted to `allowed_tools` list
 - Subagent activity is logged to transcripts
+
+## Skill Packs
+
+Skill packs are reusable instruction sets that guide the agent for specific tasks. They use the Claude Code compatible SKILL.md format with YAML frontmatter.
+
+### SKILL.md Format
+
+Skill packs are stored in `.yo/skills/<name>/SKILL.md` or `~/.yo/skills/<name>/SKILL.md`:
+
+```markdown
+---
+name: safe-file-reader
+description: Read files without making changes
+allowed-tools: Read, Grep, Glob
+---
+
+You are in safe-file-reader mode. Only inspect files; do not modify anything.
+Use Glob to find files, Grep to search content, Read to examine.
+```
+
+### Frontmatter Fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Lowercase letters, numbers, hyphens (max 64 chars) |
+| `description` | Yes | Brief description (max 1024 chars) |
+| `allowed-tools` | No | Restrict to specific tools (CSV or YAML list) |
+
+### Using Skill Packs
+
+**Via REPL:**
+```
+/skillpacks              # List available skill packs
+/skillpack use reader    # Activate a skill pack
+/skillpack active        # Show active skill packs
+/skillpack drop reader   # Deactivate
+```
+
+**Via LLM (ActivateSkill tool):**
+The agent can activate skills using the `ActivateSkill` tool, or by mentioning `$skill-name` in conversation.
+
+### Tool Restrictions
+
+When multiple skills are active, their `allowed-tools` are intersected. Only tools allowed by all active skills can be used.
+
+## Model Routing
+
+Model routing automatically selects the best model for each subagent based on task type. Different models excel at different tasks—planning, coding, exploration, etc.
+
+### Route Categories
+
+| Category | Keywords | Default Target |
+|----------|----------|----------------|
+| `planning` | plan, architect, design | qwen3-235b@venice |
+| `coding` | patch, edit, code, implement | claude-3-5-sonnet@claude |
+| `exploration` | scout, explore, find, search | gpt-4o-mini@chatgpt |
+| `testing` | test, verify, check | gpt-4o-mini@chatgpt |
+| `documentation` | doc, readme, comment | gpt-4o-mini@chatgpt |
+| `fast` | (explicit) | gpt-4o-mini@chatgpt |
+| `default` | (fallback) | gpt-4o-mini@chatgpt |
+
+### How It Works
+
+1. Subagent name/description is analyzed for keywords
+2. Category is inferred from keywords
+3. Target is resolved: explicit spec > config route > hardcoded default
+4. Subagent runs on the selected model
+
+### Configuration
+
+Override defaults in config:
+
+```toml
+[model_routing.routes]
+planning = "qwen3-235b-a22b-instruct-2507@venice"
+coding = "claude-3-5-sonnet-latest@claude"
+exploration = "gpt-4o-mini@chatgpt"
+testing = "gpt-4o-mini@chatgpt"
+```
+
+Explicit `target` in agent specs always takes priority over routing.
 
 ## Architecture
 
@@ -256,7 +342,13 @@ User Input
 | `tools/glob.rs` | File pattern matching |
 | `tools/task.rs` | Subagent delegation tool |
 | `tools/mcp_dispatch.rs` | Route MCP tool calls |
+| `tools/activate_skill.rs` | Skill pack activation tool |
 | `subagent.rs` | Subagent runtime, tool filtering, mode clamping |
+| `skillpacks/mod.rs` | Skill pack module exports |
+| `skillpacks/parser.rs` | SKILL.md file parser |
+| `skillpacks/index.rs` | Skill pack discovery and indexing |
+| `skillpacks/activation.rs` | Active skill lifecycle |
+| `model_routing.rs` | Task-based model selection |
 | `mcp/client.rs` | MCP JSON-RPC client |
 | `mcp/manager.rs` | MCP server lifecycle |
 | `mcp/transport.rs` | Stdio transport layer |
@@ -265,7 +357,7 @@ User Input
 
 1. User input received (REPL or one-shot)
 2. Agent adds message to conversation
-3. Agent resolves skill → target (model@backend)
+3. Agent resolves target (model@backend)
 4. Agent collects tool schemas (built-in + MCP)
 5. LLM request sent with messages + tools
 6. Response parsed for text and tool calls
@@ -281,5 +373,6 @@ Sessions logged to `.yo/sessions/<uuid>.jsonl` with events:
 - Tool calls and results
 - Permission decisions
 - Subagent lifecycle (start, end, tool calls)
+- Skill pack lifecycle (index built, activate, deactivate, parse errors)
 - MCP server lifecycle
 - Errors and metadata

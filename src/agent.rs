@@ -33,17 +33,45 @@ pub fn run_turn(ctx: &Context, user_input: &str, messages: &mut Vec<Value>) -> R
         "content": user_input
     }));
 
-    // Resolve target for current skill
-    let skill = ctx.current_skill.borrow().clone();
-    let config = ctx.config.borrow();
-    let target = config
-        .resolve_skill(&skill)
-        .or_else(|| config.default_target())
-        .ok_or_else(|| anyhow::anyhow!("No target configured for skill: {}", skill))?;
-    let bash_config = config.bash.clone();
-    drop(config);
+    // Resolve target: override > config default
+    let target = {
+        let current = ctx.current_target.borrow();
+        if let Some(t) = current.as_ref() {
+            t.clone()
+        } else {
+            ctx.config
+                .borrow()
+                .get_default_target()
+                .ok_or_else(|| anyhow::anyhow!("No target configured. Use --target or /target"))?
+        }
+    };
+    let bash_config = ctx.config.borrow().bash.clone();
 
-    trace(ctx, "TARGET", &format!("{} (skill: {})", target, skill));
+    trace(ctx, "TARGET", &target.to_string());
+
+    // Check for $skill-name mentions and auto-activate
+    for word in user_input.split_whitespace() {
+        if word.starts_with('$') && word.len() > 1 {
+            let skill_name =
+                &word[1..].trim_end_matches(|c: char| !c.is_alphanumeric() && c != '-');
+            let index = ctx.skill_index.borrow();
+            if index.get(skill_name).is_some() {
+                let active = ctx.active_skills.borrow();
+                if active.get(skill_name).is_none() {
+                    drop(active);
+                    let mut active = ctx.active_skills.borrow_mut();
+                    if let Ok(activation) = active.activate(skill_name, &index) {
+                        let _ = ctx.transcript.borrow_mut().skill_activate(
+                            &activation.name,
+                            Some("auto-activated from $mention"),
+                            activation.allowed_tools.as_ref(),
+                        );
+                        trace(ctx, "SKILL", &format!("Auto-activated: {}", skill_name));
+                    }
+                }
+            }
+        }
+    }
 
     // Get built-in tool schemas (including Task for main agent) and add MCP tools
     let mut tool_schemas = tools::schemas_with_task();
@@ -57,6 +85,33 @@ pub fn run_turn(ctx: &Context, user_input: &str, messages: &mut Vec<Value>) -> R
         }
     }
 
+    // Apply allowed-tools restriction from active skills
+    let active_skills = ctx.active_skills.borrow();
+    let effective_allowed = active_skills.effective_allowed_tools();
+    drop(active_skills);
+
+    if let Some(allowed) = &effective_allowed {
+        tool_schemas.retain(|schema| {
+            if let Some(name) = schema
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+            {
+                // ActivateSkill is always available
+                if name == "ActivateSkill" {
+                    return true;
+                }
+                // Task is always available for subagent delegation
+                if name == "Task" {
+                    return true;
+                }
+                allowed.iter().any(|a| a == name)
+            } else {
+                false
+            }
+        });
+    }
+
     // Use max_turns from CLI if provided, otherwise default
     let max_iterations = ctx.args.max_turns.unwrap_or(MAX_ITERATIONS);
 
@@ -68,9 +123,29 @@ pub fn run_turn(ctx: &Context, user_input: &str, messages: &mut Vec<Value>) -> R
             let mut backends = ctx.backends.borrow_mut();
             let client = backends.get_client(&target.backend)?;
 
+            // Build system prompt with skill pack info
+            let mut system_prompt = SYSTEM_PROMPT.to_string();
+
+            // Add skill pack index
+            let skill_index = ctx.skill_index.borrow();
+            let skill_prompt = skill_index.format_for_prompt(50);
+            drop(skill_index);
+            if !skill_prompt.is_empty() {
+                system_prompt.push_str("\n\n");
+                system_prompt.push_str(&skill_prompt);
+            }
+
+            // Add active skill instructions
+            let active_skills = ctx.active_skills.borrow();
+            if !active_skills.is_empty() {
+                system_prompt.push_str("\n\n");
+                system_prompt.push_str(&active_skills.format_for_conversation());
+            }
+            drop(active_skills);
+
             let mut req_messages = vec![json!({
                 "role": "system",
-                "content": SYSTEM_PROMPT
+                "content": system_prompt
             })];
             req_messages.extend(messages.clone());
 
@@ -169,7 +244,48 @@ pub fn run_turn(ctx: &Context, user_input: &str, messages: &mut Vec<Value>) -> R
             );
 
             let result = if allowed {
-                if name == "Task" {
+                if name == "ActivateSkill" {
+                    // Execute ActivateSkill tool
+                    let skill_name = args["name"].as_str().unwrap_or("");
+                    let reason = args["reason"].as_str();
+
+                    if skill_name.is_empty() {
+                        json!({
+                            "error": {
+                                "code": "missing_name",
+                                "message": "Missing required 'name' parameter"
+                            }
+                        })
+                    } else {
+                        let skill_index = ctx.skill_index.borrow();
+                        let mut active_skills = ctx.active_skills.borrow_mut();
+                        match active_skills.activate(skill_name, &skill_index) {
+                            Ok(activation) => {
+                                let _ = ctx.transcript.borrow_mut().skill_activate(
+                                    &activation.name,
+                                    reason,
+                                    activation.allowed_tools.as_ref(),
+                                );
+                                json!({
+                                    "ok": true,
+                                    "name": activation.name,
+                                    "description": activation.description,
+                                    "allowed_tools": activation.allowed_tools,
+                                    "instructions_loaded": true,
+                                    "message": format!("Skill '{}' activated. Instructions loaded.", activation.name)
+                                })
+                            }
+                            Err(e) => {
+                                json!({
+                                    "error": {
+                                        "code": "activation_failed",
+                                        "message": e.to_string()
+                                    }
+                                })
+                            }
+                        }
+                    }
+                } else if name == "Task" {
                     // Execute Task tool (subagent delegation)
                     tools::task::execute(args.clone(), ctx)?
                 } else if name.starts_with("mcp.") {

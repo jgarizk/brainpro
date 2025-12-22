@@ -178,20 +178,28 @@ pub fn run_subagent(
         PolicyEngine::new(subagent_config, true, false)
     };
 
-    // Resolve target for subagent
+    // Resolve target using model routing:
+    // 1. If spec.target is set explicitly, use it
+    // 2. Otherwise, use ModelRouter to select based on agent name/description
+    // 3. Fallback to parent's current target or config default
     let config = ctx.config.borrow();
-    let target = if let Some(target_str) = &spec.target {
-        crate::config::Target::parse(target_str)
-    } else if let Some(skill) = &spec.skill {
-        config.resolve_skill(skill)
-    } else {
-        // Inherit from current skill
-        let skill = ctx.current_skill.borrow().clone();
-        config
-            .resolve_skill(&skill)
-            .or_else(|| config.default_target())
+    let fallback = {
+        let current = ctx.current_target.borrow();
+        current
+            .as_ref()
+            .cloned()
+            .or_else(|| config.get_default_target())
+            .ok_or_else(|| anyhow::anyhow!("No target configured for subagent"))?
     };
-    let target = target.ok_or_else(|| anyhow::anyhow!("No target configured for subagent"))?;
+    let target = {
+        let router = ctx.model_router.borrow();
+        router.resolve_for_agent(
+            &spec.name,
+            &spec.description,
+            spec.target.as_deref(),
+            &fallback,
+        )
+    };
     let bash_config = config.bash.clone();
     drop(config);
 

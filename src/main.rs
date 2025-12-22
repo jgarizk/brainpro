@@ -4,7 +4,9 @@ mod cli;
 mod config;
 mod llm;
 mod mcp;
+mod model_routing;
 mod policy;
+mod skillpacks;
 mod subagent;
 mod tools;
 mod transcript;
@@ -103,23 +105,18 @@ fn main() -> Result<()> {
 
     // Apply --target override if provided
     if let Some(target_str) = &args.target {
-        cfg.skills.insert("default".to_string(), target_str.clone());
+        cfg.default_target = Some(target_str.clone());
     }
 
-    // If no default skill is set, try to set one based on available API keys
+    // If no default target is set, try to set one based on available API keys
     // Priority: Venice (our default) > ChatGPT > Claude > Ollama
-    if cfg.resolve_skill("default").is_none() {
+    if cfg.default_target.is_none() {
         if std::env::var("VENICE_API_KEY").is_ok() || std::env::var("venice_api_key").is_ok() {
-            cfg.skills
-                .insert("default".to_string(), format!("{}@venice", args.model));
+            cfg.default_target = Some(format!("{}@venice", args.model));
         } else if std::env::var("OPENAI_API_KEY").is_ok() {
-            cfg.skills
-                .insert("default".to_string(), "gpt-4o-mini@chatgpt".to_string());
+            cfg.default_target = Some("gpt-4o-mini@chatgpt".to_string());
         } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-            cfg.skills.insert(
-                "default".to_string(),
-                "claude-3-5-sonnet-latest@claude".to_string(),
-            );
+            cfg.default_target = Some("claude-3-5-sonnet-latest@claude".to_string());
         }
         // Ollama doesn't need a key, but user should explicitly set --target
     }
@@ -142,9 +139,10 @@ fn main() -> Result<()> {
                     })
             );
         }
-        println!("\nSkills → Targets:");
-        for (skill, target) in &cfg.skills {
-            println!("  {}: {}", skill, target);
+        if let Some(target) = &cfg.default_target {
+            println!("\nDefault target: {}", target);
+        } else {
+            println!("\nNo default target configured.");
         }
         return Ok(());
     }
@@ -190,7 +188,7 @@ fn main() -> Result<()> {
 
     let session_id = uuid::Uuid::new_v4().to_string();
     let transcript_path = transcripts_dir.join(format!("{}.jsonl", session_id));
-    let transcript = transcript::Transcript::new(&transcript_path, &session_id, &root)?;
+    let mut transcript = transcript::Transcript::new(&transcript_path, &session_id, &root)?;
 
     let trace = args.trace;
     let backends = backend::BackendRegistry::new(&cfg);
@@ -203,6 +201,20 @@ fn main() -> Result<()> {
     // Create MCP manager from config
     let mcp_manager = mcp::manager::McpManager::new(cfg.mcp.servers.clone());
 
+    // Build skill pack index
+    let skill_index = skillpacks::SkillIndex::build(&root);
+
+    // Log skill index built
+    let _ = transcript.skill_index_built(skill_index.count());
+
+    // Log parse errors
+    for (path, error) in skill_index.errors() {
+        let _ = transcript.skill_parse_error(path, error);
+    }
+
+    // Create model router
+    let model_router = model_routing::ModelRouter::new(cfg.model_routing.clone());
+
     let ctx = cli::Context {
         args,
         root,
@@ -211,9 +223,12 @@ fn main() -> Result<()> {
         tracing: RefCell::new(trace),
         config: RefCell::new(cfg),
         backends: RefCell::new(backends),
-        current_skill: RefCell::new("default".to_string()),
+        current_target: RefCell::new(None),
         policy: RefCell::new(policy_engine),
         mcp_manager: RefCell::new(mcp_manager),
+        skill_index: RefCell::new(skill_index),
+        active_skills: RefCell::new(skillpacks::ActiveSkills::new()),
+        model_router: RefCell::new(model_router),
     };
 
     if let Some(prompt) = &ctx.args.prompt {

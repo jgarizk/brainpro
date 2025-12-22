@@ -229,4 +229,47 @@ impl Transcript {
             }),
         )
     }
+
+    /// Log skill index built
+    pub fn skill_index_built(&mut self, count: usize) -> Result<()> {
+        self.log(
+            "skill_index_built",
+            serde_json::json!({
+                "count": count,
+            }),
+        )
+    }
+
+    /// Log skill activation
+    pub fn skill_activate(
+        &mut self,
+        name: &str,
+        reason: Option<&str>,
+        allowed_tools: Option<&Vec<String>>,
+    ) -> Result<()> {
+        self.log(
+            "skill_activate",
+            serde_json::json!({
+                "name": name,
+                "reason": reason,
+                "allowed_tools": allowed_tools,
+            }),
+        )
+    }
+
+    /// Log skill deactivation
+    pub fn skill_deactivate(&mut self, name: &str) -> Result<()> {
+        self.log("skill_deactivate", serde_json::json!({ "name": name }))
+    }
+
+    /// Log skill parse error
+    pub fn skill_parse_error(&mut self, path: &std::path::Path, error: &str) -> Result<()> {
+        self.log(
+            "skill_parse_error",
+            serde_json::json!({
+                "path": path.display().to_string(),
+                "error": error,
+            }),
+        )
+    }
 }

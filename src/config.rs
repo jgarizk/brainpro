@@ -97,8 +97,6 @@ pub struct AgentSpec {
     #[serde(default)]
     pub description: String,
     #[serde(default)]
-    pub skill: Option<String>,
-    #[serde(default)]
     pub target: Option<String>,
     #[serde(default = "default_allowed_tools")]
     pub allowed_tools: Vec<String>,
@@ -264,13 +262,15 @@ impl BackendConfig {
     }
 }
 
+use crate::model_routing::ModelRoutingConfig;
+
 /// Main configuration structure
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub backends: HashMap<String, BackendConfig>,
     #[serde(default)]
-    pub skills: HashMap<String, String>,
+    pub default_target: Option<String>,
     #[serde(default)]
     pub permissions: PermissionsConfig,
     #[serde(default)]
@@ -279,6 +279,8 @@ pub struct Config {
     pub context: ContextConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub model_routing: ModelRoutingConfig,
     #[serde(skip)]
     pub agents: HashMap<String, AgentSpec>,
 }
@@ -327,11 +329,12 @@ impl Config {
 
         Config {
             backends,
-            skills: HashMap::new(),
+            default_target: None,
             permissions: PermissionsConfig::default(),
             bash: BashConfig::default(),
             context: ContextConfig::default(),
             mcp: McpConfig::default(),
+            model_routing: ModelRoutingConfig::default(),
             agents: HashMap::new(),
         }
     }
@@ -392,12 +395,14 @@ impl Config {
     /// For permissions: arrays are concatenated, mode is overridden if non-default
     /// For bash/context: scalars are overridden if set
     pub fn merge(&mut self, other: Config) {
-        // Merge backends and skills
+        // Merge backends
         for (name, backend) in other.backends {
             self.backends.insert(name, backend);
         }
-        for (skill, target) in other.skills {
-            self.skills.insert(skill, target);
+
+        // Override default_target if set in other
+        if other.default_target.is_some() {
+            self.default_target = other.default_target;
         }
 
         // Merge permissions: concatenate arrays, override mode if non-default
@@ -427,14 +432,9 @@ impl Config {
         }
     }
 
-    /// Resolve a skill to its target
-    pub fn resolve_skill(&self, skill: &str) -> Option<Target> {
-        self.skills.get(skill).and_then(|s| Target::parse(s))
-    }
-
-    /// Get the default target (from "default" skill)
-    pub fn default_target(&self) -> Option<Target> {
-        self.resolve_skill("default")
+    /// Get the default target
+    pub fn get_default_target(&self) -> Option<Target> {
+        self.default_target.as_ref().and_then(|s| Target::parse(s))
     }
 
     /// Create config from CLI arguments, starting with built-in backends
@@ -466,10 +466,8 @@ impl Config {
             },
         );
 
-        // Set default skill to use CLI-provided model
-        config
-            .skills
-            .insert("default".to_string(), format!("{}@{}", model, backend_name));
+        // Set default target to use CLI-provided model
+        config.default_target = Some(format!("{}@{}", model, backend_name));
 
         config
     }

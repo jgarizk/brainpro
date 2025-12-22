@@ -44,18 +44,12 @@ base_url = "http://localhost:11434/v1"
 # Ollama typically doesn't require an API key
 
 # =============================================================================
-# SKILLS
+# DEFAULT TARGET
 # =============================================================================
-# Skills map task categories to targets. A target is "model@backend".
-#
-# The "default" skill is used when no specific skill is selected.
-# Switch skills in REPL with: /skill <name>
+# The default target to use when no --target flag is provided.
+# Format: model@backend
 
-[skills]
-default = "qwen3-235b-a22b-instruct-2507@venice"
-# planning = "gpt-4@chatgpt"
-# coding = "claude-3-5-sonnet-latest@claude"
-# fast = "llama3.2@ollama"
+default_target = "qwen3-235b-a22b-instruct-2507@venice"
 
 # =============================================================================
 # PERMISSIONS
@@ -147,6 +141,33 @@ auto_compact_enabled = true
 keep_last_turns = 10
 
 # =============================================================================
+# MODEL ROUTING
+# =============================================================================
+# Configure automatic model selection based on task type.
+# Subagents are automatically routed to different models based on their
+# name/description. Override defaults here.
+#
+# Route categories:
+#   planning      - Architecture and design tasks (keywords: plan, architect, design)
+#   coding        - Code generation and refactoring (keywords: patch, edit, code, implement)
+#   exploration   - Finding files, understanding codebase (keywords: scout, explore, find)
+#   testing       - Running tests, verification (keywords: test, verify, check)
+#   documentation - Writing docs, READMEs (keywords: doc, readme, comment)
+#   fast          - Quick operations that need low latency
+#   default       - Fallback for unmatched categories
+#
+# Format: category = "model@backend"
+
+# [model_routing.routes]
+# planning = "qwen3-235b-a22b-instruct-2507@venice"
+# coding = "claude-3-5-sonnet-latest@claude"
+# exploration = "gpt-4o-mini@chatgpt"
+# testing = "gpt-4o-mini@chatgpt"
+# documentation = "gpt-4o-mini@chatgpt"
+# fast = "gpt-4o-mini@chatgpt"
+# default = "gpt-4o-mini@chatgpt"
+
+# =============================================================================
 # MCP (Model Context Protocol) SERVERS
 # =============================================================================
 # Configure external tool servers that implement the MCP protocol.
@@ -209,7 +230,6 @@ keep_last_turns = 10
 #   permission_mode - "default", "acceptEdits", or "bypassPermissions"
 #   max_turns       - Maximum iterations (default: 8)
 #   system_prompt   - Custom system prompt
-#   skill           - Optional skill to use for LLM target
 #   target          - Optional explicit target (model@backend)
 #
 # Use agents in REPL with:

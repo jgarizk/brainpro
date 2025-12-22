@@ -1,3 +1,4 @@
+pub mod activate_skill;
 pub mod bash;
 pub mod edit;
 mod glob;
@@ -24,7 +25,7 @@ pub fn schemas() -> Vec<Value> {
     ]
 }
 
-/// Get all tool schemas including Task (used by main agent)
+/// Get all tool schemas including Task and ActivateSkill (used by main agent)
 pub fn schemas_with_task() -> Vec<Value> {
     vec![
         read::schema(),
@@ -34,6 +35,7 @@ pub fn schemas_with_task() -> Vec<Value> {
         glob::schema(),
         bash::schema(),
         task::schema(),
+        activate_skill::schema(),
     ]
 }
 

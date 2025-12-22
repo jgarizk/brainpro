@@ -1,6 +1,15 @@
 use crate::{
-    agent, backend::BackendRegistry, config::Config, config::PermissionMode,
-    mcp::manager::McpManager, policy::PolicyEngine, transcript::Transcript, Args,
+    agent,
+    backend::BackendRegistry,
+    config::Config,
+    config::PermissionMode,
+    config::Target,
+    mcp::manager::McpManager,
+    model_routing::ModelRouter,
+    policy::PolicyEngine,
+    skillpacks::{ActiveSkills, SkillIndex},
+    transcript::Transcript,
+    Args,
 };
 use anyhow::Result;
 use rustyline::error::ReadlineError;
@@ -16,9 +25,12 @@ pub struct Context {
     pub tracing: RefCell<bool>,
     pub config: RefCell<Config>,
     pub backends: RefCell<BackendRegistry>,
-    pub current_skill: RefCell<String>,
+    pub current_target: RefCell<Option<Target>>,
     pub policy: RefCell<PolicyEngine>,
     pub mcp_manager: RefCell<McpManager>,
+    pub skill_index: RefCell<SkillIndex>,
+    pub active_skills: RefCell<ActiveSkills>,
+    pub model_router: RefCell<ModelRouter>,
 }
 
 pub fn run_once(ctx: &Context, prompt: &str) -> Result<()> {
@@ -76,9 +88,7 @@ fn handle_command(ctx: &Context, cmd: &str, messages: &mut Vec<serde_json::Value
             println!("  /clear          - clear conversation");
             println!("  /trace          - toggle tracing");
             println!("  /backends       - list configured backends");
-            println!("  /skills         - show skill → target routing");
-            println!("  /skill <name>   - set current skill");
-            println!("  /target <t>     - override current target");
+            println!("  /target [t]     - show/set current target (model@backend)");
             println!("Permissions:");
             println!("  /mode [name]    - get/set permission mode (default|acceptEdits|bypassPermissions)");
             println!("  /permissions    - show permission rules");
@@ -94,6 +104,12 @@ fn handle_command(ctx: &Context, cmd: &str, messages: &mut Vec<serde_json::Value
             println!("  /mcp connect <name>    - connect to an MCP server");
             println!("  /mcp disconnect <name> - disconnect from an MCP server");
             println!("  /mcp tools <name>      - list tools from an MCP server");
+            println!("Skill Packs:");
+            println!("  /skillpacks            - list all skill packs");
+            println!("  /skillpack show <name> - show skill details");
+            println!("  /skillpack use <name>  - activate skill");
+            println!("  /skillpack drop <name> - deactivate skill");
+            println!("  /skillpack active      - list active skills");
         }
         "/session" => {
             println!("Session: {}", ctx.session_id);
@@ -114,49 +130,13 @@ fn handle_command(ctx: &Context, cmd: &str, messages: &mut Vec<serde_json::Value
                 println!("  {}: {}", name, backend.base_url);
             }
         }
-        "/skills" => {
-            let current = ctx.current_skill.borrow();
-            let config = ctx.config.borrow();
-            println!("Skills → Targets:");
-            for (skill, target) in &config.skills {
-                let marker = if skill == &*current { " *" } else { "" };
-                println!("  {}: {}{}", skill, target, marker);
-            }
-        }
-        "/skill" => {
-            if parts.len() > 1 {
-                let skill = parts[1].trim();
-                let config = ctx.config.borrow();
-                if config.skills.contains_key(skill) {
-                    drop(config);
-                    *ctx.current_skill.borrow_mut() = skill.to_string();
-                    if let Some(target) = ctx.config.borrow().resolve_skill(skill) {
-                        println!("Switched to skill: {} ({})", skill, target);
-                    }
-                } else {
-                    println!(
-                        "Unknown skill: {}. Available: {:?}",
-                        skill,
-                        config.skills.keys().collect::<Vec<_>>()
-                    );
-                }
-            } else {
-                let skill = ctx.current_skill.borrow();
-                let config = ctx.config.borrow();
-                if let Some(target) = config.resolve_skill(&skill) {
-                    println!("Current skill: {} ({})", skill, target);
-                } else {
-                    println!("Current skill: {}", skill);
-                }
-            }
-        }
         "/target" => {
             if parts.len() > 1 {
                 let target_str = parts[1].trim();
-                if let Some(target) = crate::config::Target::parse(target_str) {
+                if let Some(target) = Target::parse(target_str) {
                     if ctx.backends.borrow().has_backend(&target.backend) {
-                        // Override the default skill's target
-                        println!("Target override: {} (use /skill to switch skills)", target);
+                        *ctx.current_target.borrow_mut() = Some(target.clone());
+                        println!("Target set: {}", target);
                     } else {
                         println!(
                             "Unknown backend: {}. Use /backends to list.",
@@ -167,12 +147,16 @@ fn handle_command(ctx: &Context, cmd: &str, messages: &mut Vec<serde_json::Value
                     println!("Invalid target format. Use: model@backend");
                 }
             } else {
-                let skill = ctx.current_skill.borrow();
-                let config = ctx.config.borrow();
-                if let Some(target) = config.resolve_skill(&skill) {
-                    println!("Current target: {} (skill: {})", target, skill);
+                let current = ctx.current_target.borrow();
+                if let Some(t) = current.as_ref() {
+                    println!("Current target: {}", t);
                 } else {
-                    println!("No target configured for skill: {}", skill);
+                    let config = ctx.config.borrow();
+                    if let Some(t) = config.get_default_target() {
+                        println!("Current target: {} (default)", t);
+                    } else {
+                        println!("No target configured. Use /target model@backend");
+                    }
                 }
             }
         }
@@ -213,6 +197,12 @@ fn handle_command(ctx: &Context, cmd: &str, messages: &mut Vec<serde_json::Value
         }
         "/task" => {
             handle_task_command(ctx, if parts.len() > 1 { parts[1] } else { "" });
+        }
+        "/skillpacks" => {
+            handle_skillpacks_command(ctx);
+        }
+        "/skillpack" => {
+            handle_skillpack_command(ctx, if parts.len() > 1 { parts[1] } else { "" });
         }
         _ => println!("Unknown command: {}", parts[0]),
     }
@@ -474,6 +464,99 @@ fn handle_task_command(ctx: &Context, args: &str) {
         }
         Err(e) => {
             eprintln!("Failed to run subagent: {}", e);
+        }
+    }
+}
+
+fn handle_skillpacks_command(ctx: &Context) {
+    use crate::skillpacks::index::SkillSource;
+
+    let index = ctx.skill_index.borrow();
+    if index.count() == 0 {
+        println!("No skill packs found.");
+        println!("Add skills to .yo/skills/<name>/SKILL.md");
+    } else {
+        println!("Skill Packs ({}):", index.count());
+        for meta in index.all() {
+            let source = match meta.source {
+                SkillSource::Project => "[project]",
+                SkillSource::User => "[user]",
+            };
+            println!("  {} {} - {}", meta.name, source, meta.description);
+        }
+    }
+
+    // Show parse errors if any
+    for (path, error) in index.errors() {
+        eprintln!("  [error] {}: {}", path.display(), error);
+    }
+}
+
+fn handle_skillpack_command(ctx: &Context, args: &str) {
+    let parts: Vec<&str> = args.splitn(2, ' ').collect();
+
+    if parts.is_empty() || parts[0].is_empty() {
+        println!("Usage:");
+        println!("  /skillpack show <name>  - show skill details");
+        println!("  /skillpack use <name>   - activate skill");
+        println!("  /skillpack drop <name>  - deactivate skill");
+        println!("  /skillpack active       - list active skills");
+        return;
+    }
+
+    match parts[0] {
+        "show" if parts.len() > 1 => {
+            let name = parts[1].trim();
+            let index = ctx.skill_index.borrow();
+            if let Some(meta) = index.get(name) {
+                println!("Skill: {}", meta.name);
+                println!("Description: {}", meta.description);
+                if let Some(tools) = &meta.allowed_tools {
+                    println!("Allowed tools: {}", tools.join(", "));
+                }
+                println!("Path: {}", meta.path.display());
+            } else {
+                println!("Skill '{}' not found", name);
+            }
+        }
+        "use" if parts.len() > 1 => {
+            let name = parts[1].trim();
+            let index = ctx.skill_index.borrow();
+            let mut active = ctx.active_skills.borrow_mut();
+            match active.activate(name, &index) {
+                Ok(activation) => {
+                    println!("Activated skill: {}", activation.name);
+                    let _ = ctx.transcript.borrow_mut().skill_activate(
+                        &activation.name,
+                        None,
+                        activation.allowed_tools.as_ref(),
+                    );
+                }
+                Err(e) => println!("Error: {}", e),
+            }
+        }
+        "drop" if parts.len() > 1 => {
+            let name = parts[1].trim();
+            let mut active = ctx.active_skills.borrow_mut();
+            match active.deactivate(name) {
+                Ok(()) => {
+                    println!("Deactivated skill: {}", name);
+                    let _ = ctx.transcript.borrow_mut().skill_deactivate(name);
+                }
+                Err(e) => println!("Error: {}", e),
+            }
+        }
+        "active" => {
+            let active = ctx.active_skills.borrow();
+            let names = active.list();
+            if names.is_empty() {
+                println!("No active skills");
+            } else {
+                println!("Active skills: {}", names.join(", "));
+            }
+        }
+        _ => {
+            println!("Unknown subcommand. Use: show, use, drop, active");
         }
     }
 }
