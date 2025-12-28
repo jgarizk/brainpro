@@ -4,6 +4,7 @@ use crate::{
     config::Config,
     config::PermissionMode,
     config::Target,
+    hooks::HookManager,
     mcp::manager::McpManager,
     model_routing::ModelRouter,
     plan::{self, PlanModeState},
@@ -42,6 +43,7 @@ pub struct Context {
     pub active_skills: RefCell<ActiveSkills>,
     pub model_router: RefCell<ModelRouter>,
     pub plan_mode: RefCell<PlanModeState>,
+    pub hooks: RefCell<HookManager>,
 }
 
 /// Print command stats to stderr
@@ -61,6 +63,14 @@ fn print_stats(duration: Duration, stats: &CommandStats) {
 }
 
 pub fn run_once(ctx: &Context, prompt: &str) -> Result<()> {
+    // Run UserPromptSubmit hooks
+    let (proceed, updated_prompt) = ctx.hooks.borrow().user_prompt_submit(prompt);
+    if !proceed {
+        eprintln!("Prompt blocked by hook");
+        return Ok(());
+    }
+    let prompt = updated_prompt.as_deref().unwrap_or(prompt);
+
     let start = Instant::now();
     let mut messages = Vec::new();
     let stats = agent::run_turn(ctx, prompt, &mut messages)?;
@@ -94,8 +104,16 @@ pub fn run_repl(ctx: Context) -> Result<()> {
                     continue;
                 }
 
+                // Run UserPromptSubmit hooks
+                let (proceed, updated_prompt) = ctx.hooks.borrow().user_prompt_submit(line);
+                if !proceed {
+                    eprintln!("Prompt blocked by hook");
+                    continue;
+                }
+                let line = updated_prompt.unwrap_or_else(|| line.to_string());
+
                 let start = Instant::now();
-                match agent::run_turn(&ctx, line, &mut messages) {
+                match agent::run_turn(&ctx, &line, &mut messages) {
                     Ok(stats) => {
                         print_stats(start.elapsed(), &stats);
                     }

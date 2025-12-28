@@ -13,6 +13,32 @@ pub enum PermissionMode {
     BypassPermissions,
 }
 
+/// Hook event types (Claude Code compatible)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum HookEvent {
+    PreToolUse,
+    PostToolUse,
+    UserPromptSubmit,
+    Stop,
+    SubagentStop,
+    SessionStart,
+}
+
+/// Configuration for a single hook
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HookConfig {
+    pub event: HookEvent,
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub matcher: Option<String>, // Regex pattern for tool name (PreToolUse/PostToolUse only)
+    #[serde(default = "default_hook_timeout")]
+    pub timeout_ms: u64,
+}
+
+fn default_hook_timeout() -> u64 {
+    60_000 // 60 seconds
+}
+
 impl PermissionMode {
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
@@ -281,6 +307,8 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub model_routing: ModelRoutingConfig,
+    #[serde(default)]
+    pub hooks: Vec<HookConfig>,
     #[serde(skip)]
     pub agents: HashMap<String, AgentSpec>,
 }
@@ -335,6 +363,7 @@ impl Config {
             context: ContextConfig::default(),
             mcp: McpConfig::default(),
             model_routing: ModelRoutingConfig::default(),
+            hooks: Vec::new(),
             agents: HashMap::new(),
         }
     }
@@ -430,6 +459,9 @@ impl Config {
         for (name, server) in other.mcp.servers {
             self.mcp.servers.insert(name, server);
         }
+
+        // Merge hooks (concatenate)
+        self.hooks.extend(other.hooks);
     }
 
     /// Get the default target

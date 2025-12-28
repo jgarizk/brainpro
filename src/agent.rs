@@ -352,7 +352,22 @@ pub fn run_turn(
                 matched_rule.as_deref(),
             );
 
-            let result = if allowed {
+            // Run PreToolUse hooks (can block or modify args)
+            let (hook_proceed, updated_args) = ctx.hooks.borrow().pre_tool_use(name, &args);
+            let args = updated_args.unwrap_or(args);
+
+            // Track tool execution time
+            let tool_start = std::time::Instant::now();
+
+            let result = if !hook_proceed {
+                // PreToolUse hook blocked the tool
+                json!({
+                    "error": {
+                        "code": "hook_blocked",
+                        "message": "Blocked by PreToolUse hook"
+                    }
+                })
+            } else if allowed {
                 if name == "ActivateSkill" {
                     // Execute ActivateSkill tool
                     let skill_name = args["name"].as_str().unwrap_or("");
@@ -465,7 +480,13 @@ pub fn run_turn(
             };
 
             let ok = result.get("error").is_none();
+            let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
             let _ = ctx.transcript.borrow_mut().tool_result(name, ok, &result);
+
+            // Run PostToolUse hooks
+            ctx.hooks
+                .borrow()
+                .post_tool_use(name, &args, &result, tool_duration_ms);
 
             trace(
                 ctx,
@@ -486,6 +507,9 @@ pub fn run_turn(
             }));
         }
     }
+
+    // Run Stop hooks (note: force_continue not implemented yet)
+    let _ = ctx.hooks.borrow().on_stop("end_turn", None);
 
     Ok(stats)
 }

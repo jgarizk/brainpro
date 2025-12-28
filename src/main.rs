@@ -2,6 +2,7 @@ mod agent;
 mod backend;
 mod cli;
 mod config;
+mod hooks;
 mod llm;
 mod mcp;
 mod model_routing;
@@ -216,6 +217,9 @@ fn main() -> Result<()> {
     // Create model router
     let model_router = model_routing::ModelRouter::new(cfg.model_routing.clone());
 
+    // Create hook manager
+    let hook_manager = hooks::HookManager::new(cfg.hooks.clone(), session_id.clone(), root.clone());
+
     let ctx = cli::Context {
         args,
         root,
@@ -231,7 +235,16 @@ fn main() -> Result<()> {
         active_skills: RefCell::new(skillpacks::ActiveSkills::new()),
         model_router: RefCell::new(model_router),
         plan_mode: RefCell::new(plan::PlanModeState::new()),
+        hooks: RefCell::new(hook_manager),
     };
+
+    // Fire SessionStart hook
+    let session_mode = if ctx.args.prompt.is_some() {
+        "one-shot"
+    } else {
+        "repl"
+    };
+    ctx.hooks.borrow().on_session_start(session_mode);
 
     if let Some(prompt) = &ctx.args.prompt {
         cli::run_once(&ctx, prompt)

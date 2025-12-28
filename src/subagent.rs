@@ -492,6 +492,11 @@ pub fn run_subagent(
         .borrow_mut()
         .subagent_end(agent_name, !had_errors, duration_ms);
 
+    // Run SubagentStop hooks
+    ctx.hooks
+        .borrow()
+        .on_subagent_stop(agent_name, !had_errors, &collected_text, duration_ms);
+
     trace(
         ctx,
         agent_name,
