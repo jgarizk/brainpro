@@ -17,19 +17,19 @@ line 3
 line 4
 EOF
 
-# Create patch file
-cat > "$SCRATCH_DIR/changes.patch" << 'EOF'
---- a/example.txt
-+++ b/example.txt
+# More explicit prompt with the patch content inline
+PROMPT='Read fixtures/scratch/changes.patch and apply its contents to the target file using the Patch tool. The patch file contains:
+
+--- a/fixtures/scratch/example.txt
++++ b/fixtures/scratch/example.txt
 @@ -1,4 +1,5 @@
  line 1
 +inserted line
  line 2
  line 3
  line 4
-EOF
 
-PROMPT="Apply the patch from fixtures/scratch/changes.patch to fixtures/scratch/example.txt using the Patch tool"
+Use the Patch tool with this exact patch content and path "fixtures/scratch/example.txt"'
 
 OUTPUT=$(run_yo_oneshot "$PROMPT" --mode acceptEdits)
 EXIT_CODE=$?
