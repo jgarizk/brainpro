@@ -188,6 +188,28 @@ pub fn format_tool_result(name: &str, result: &Value) -> String {
             }
         }
         "Bash" => {
+            let mut output = String::new();
+
+            // Display stdout if present
+            if let Some(stdout) = result.get("stdout").and_then(|v| v.as_str()) {
+                if !stdout.trim().is_empty() {
+                    output.push_str(stdout);
+                    if !stdout.ends_with('\n') {
+                        output.push('\n');
+                    }
+                }
+            }
+
+            // Display stderr if present
+            if let Some(stderr) = result.get("stderr").and_then(|v| v.as_str()) {
+                if !stderr.trim().is_empty() {
+                    output.push_str(stderr);
+                    if !stderr.ends_with('\n') {
+                        output.push('\n');
+                    }
+                }
+            }
+
             let exit_code = result.get("exit_code").and_then(|v| v.as_i64());
             let duration = result
                 .get("duration_ms")
@@ -211,10 +233,14 @@ pub fn format_tool_result(name: &str, result: &Value) -> String {
             };
 
             if truncated {
-                format!("  ⎿  {} in {} (output truncated)", status, duration_str)
+                output.push_str(&format!(
+                    "  ⎿  {} in {} (output truncated)",
+                    status, duration_str
+                ));
             } else {
-                format!("  ⎿  {} in {}", status, duration_str)
+                output.push_str(&format!("  ⎿  {} in {}", status, duration_str));
             }
+            output
         }
         "Glob" => {
             let paths = result

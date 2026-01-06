@@ -1,46 +1,7 @@
-use super::SchemaOptions;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::path::Path;
 use walkdir::WalkDir;
-
-pub fn schema(opts: &SchemaOptions) -> Value {
-    if opts.optimize {
-        json!({
-            "type": "function",
-            "function": {
-                "name": "Grep",
-                "description": "Search content by regex",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "pattern": { "type": "string" },
-                        "paths": { "type": "array", "items": { "type": "string" } },
-                        "max_results": { "type": "integer" }
-                    },
-                    "required": ["pattern"]
-                }
-            }
-        })
-    } else {
-        json!({
-            "type": "function",
-            "function": {
-                "name": "Grep",
-                "description": "Search file contents for pattern. Skips .git, target, .yo dirs.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "pattern": { "type": "string", "description": "Regex pattern to search" },
-                        "paths": { "type": "array", "items": { "type": "string" }, "description": "Paths to search (default: all)" },
-                        "max_results": { "type": "integer", "description": "Max matches (default 100)" }
-                    },
-                    "required": ["pattern"]
-                }
-            }
-        })
-    }
-}
 
 pub fn execute(args: Value, root: &Path) -> anyhow::Result<Value> {
     let pattern = args["pattern"].as_str().unwrap_or("");

@@ -42,7 +42,7 @@ pub fn schema(opts: &SchemaOptions) -> Value {
                         "path": { "type": "string", "description": "Directory to search (default: project root)" },
                         "output_mode": { "type": "string", "description": "Output format: 'content', 'files_with_matches', or 'count' (default: files_with_matches)" },
                         "glob": { "type": "string", "description": "Filter files by glob pattern (e.g. '*.rs')" },
-                        "case_insensitive": { "type": "boolean", "description": "Case-insensitive search (default: false)" },
+                        "case_insensitive": { "type": "boolean", "description": "Case-insensitive search (default: true)" },
                         "context_before": { "type": "integer", "description": "Lines before match (output_mode=content only)" },
                         "context_after": { "type": "integer", "description": "Lines after match (output_mode=content only)" },
                         "max_results": { "type": "integer", "description": "Max results to return (default: 100)" }
@@ -59,7 +59,7 @@ pub fn execute(args: Value, root: &Path) -> anyhow::Result<Value> {
     let search_path = args["path"].as_str();
     let output_mode = args["output_mode"].as_str().unwrap_or("files_with_matches");
     let glob_pattern = args["glob"].as_str();
-    let case_insensitive = args["case_insensitive"].as_bool().unwrap_or(false);
+    let case_insensitive = args["case_insensitive"].as_bool().unwrap_or(true);
     let context_before = args["context_before"].as_u64().unwrap_or(0) as usize;
     let context_after = args["context_after"].as_u64().unwrap_or(0) as usize;
     let max_results = args["max_results"].as_u64().unwrap_or(100) as usize;
@@ -142,10 +142,10 @@ fn search_files_with_matches(
         let path = entry.path();
         let rel_path = path.strip_prefix(project_root).unwrap_or(path);
 
-        // Apply glob filter
+        // Apply glob filter - match against relative path for patterns like **/*.rs
         if let Some(g) = glob_matcher {
-            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !g.matches(file_name) {
+            let rel_str = rel_path.to_string_lossy();
+            if !g.matches(&rel_str) && !g.matches_path(rel_path) {
                 continue;
             }
         }
@@ -202,10 +202,10 @@ fn search_content(
         let path = entry.path();
         let rel_path = path.strip_prefix(project_root).unwrap_or(path);
 
-        // Apply glob filter
+        // Apply glob filter - match against relative path for patterns like **/*.rs
         if let Some(g) = glob_matcher {
-            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !g.matches(file_name) {
+            let rel_str = rel_path.to_string_lossy();
+            if !g.matches(&rel_str) && !g.matches_path(rel_path) {
                 continue;
             }
         }
@@ -284,10 +284,10 @@ fn search_count(
         let path = entry.path();
         let rel_path = path.strip_prefix(project_root).unwrap_or(path);
 
-        // Apply glob filter
+        // Apply glob filter - match against relative path for patterns like **/*.rs
         if let Some(g) = glob_matcher {
-            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !g.matches(file_name) {
+            let rel_str = rel_path.to_string_lossy();
+            if !g.matches(&rel_str) && !g.matches_path(rel_path) {
                 continue;
             }
         }
