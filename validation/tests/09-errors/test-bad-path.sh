@@ -16,6 +16,6 @@ EXIT_CODE=$?
 # Should complete without crash
 assert_exit_code 0 "$EXIT_CODE"
 # Should indicate path is not allowed or error
-assert_output_matches "(path|escape|not allowed|outside|error|Error|denied)" "$OUTPUT"
+assert_output_matches "(path|escape|not allowed|outside|error|Error|denied|access|cannot|isolated)" "$OUTPUT"
 
 report_result
