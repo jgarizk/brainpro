@@ -64,9 +64,21 @@ impl TodoState {
 
     /// Count by status
     pub fn count_by_status(&self) -> (usize, usize, usize) {
-        let pending = self.todos.iter().filter(|t| t.status == TodoStatus::Pending).count();
-        let in_progress = self.todos.iter().filter(|t| t.status == TodoStatus::InProgress).count();
-        let completed = self.todos.iter().filter(|t| t.status == TodoStatus::Completed).count();
+        let pending = self
+            .todos
+            .iter()
+            .filter(|t| t.status == TodoStatus::Pending)
+            .count();
+        let in_progress = self
+            .todos
+            .iter()
+            .filter(|t| t.status == TodoStatus::InProgress)
+            .count();
+        let completed = self
+            .todos
+            .iter()
+            .filter(|t| t.status == TodoStatus::Completed)
+            .count();
         (pending, in_progress, completed)
     }
 }
@@ -165,7 +177,10 @@ pub fn execute(args: Value, todo_state: &RefCell<TodoState>) -> Value {
     };
 
     // Validate: at most one in_progress
-    let in_progress_count = todos.iter().filter(|t| t.status == TodoStatus::InProgress).count();
+    let in_progress_count = todos
+        .iter()
+        .filter(|t| t.status == TodoStatus::InProgress)
+        .count();
     if in_progress_count > 1 {
         return json!({
             "error": {

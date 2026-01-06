@@ -66,10 +66,7 @@ pub fn exit_schema(opts: &SchemaOptions) -> Value {
 }
 
 /// Execute EnterPlanMode tool
-pub fn execute_enter(
-    plan_state: &RefCell<crate::plan::PlanModeState>,
-    goal: &str,
-) -> Value {
+pub fn execute_enter(plan_state: &RefCell<crate::plan::PlanModeState>, goal: &str) -> Value {
     let mut state = plan_state.borrow_mut();
 
     if state.phase != PlanPhase::Inactive {

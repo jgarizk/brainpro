@@ -95,59 +95,6 @@ pub struct BashConfig {
     pub max_output_bytes: Option<usize>,
 }
 
-/// MCP transport type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum McpTransport {
-    #[default]
-    Stdio,
-    Http,
-    Sse,
-}
-
-/// Configuration for an MCP server
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpServerConfig {
-    /// For stdio: the command to spawn
-    /// For http/sse: not used (use url instead)
-    #[serde(default)]
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: HashMap<String, String>,
-    #[serde(default = "default_cwd")]
-    pub cwd: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub auto_start: bool,
-    #[serde(default = "default_timeout_ms")]
-    pub timeout_ms: u64,
-    /// Transport type: stdio, http, or sse
-    #[serde(default)]
-    pub transport: McpTransport,
-    /// URL for http/sse transports
-    #[serde(default)]
-    pub url: Option<String>,
-}
-
-fn default_cwd() -> String {
-    ".".to_string()
-}
-
-fn default_timeout_ms() -> u64 {
-    30_000
-}
-
-/// MCP configuration section
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct McpConfig {
-    #[serde(default)]
-    pub servers: HashMap<String, McpServerConfig>,
-}
-
 /// Specification for a subagent
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentSpec {
@@ -337,8 +284,6 @@ pub struct Config {
     #[serde(default)]
     pub context: ContextConfig,
     #[serde(default)]
-    pub mcp: McpConfig,
-    #[serde(default)]
     pub model_routing: ModelRoutingConfig,
     #[serde(default)]
     pub hooks: Vec<HookConfig>,
@@ -398,7 +343,6 @@ impl Config {
             permissions: PermissionsConfig::default(),
             bash: BashConfig::default(),
             context: ContextConfig::default(),
-            mcp: McpConfig::default(),
             model_routing: ModelRoutingConfig::default(),
             hooks: Vec::new(),
             cost_tracking: CostConfig::default(),
@@ -493,11 +437,6 @@ impl Config {
         // (since there's no Option wrapper, we check if they differ from defaults)
         // For simplicity, we just take the other's values if the other config was loaded
         self.context = other.context;
-
-        // Merge MCP servers
-        for (name, server) in other.mcp.servers {
-            self.mcp.servers.insert(name, server);
-        }
 
         // Merge hooks (concatenate)
         self.hooks.extend(other.hooks);
@@ -617,28 +556,6 @@ impl Config {
                     field: format!("hooks[{}].command", i),
                     message: "Command must not be empty".to_string(),
                 });
-            }
-        }
-
-        // Validate MCP server configs based on transport type
-        for (name, server) in &self.mcp.servers {
-            match server.transport {
-                McpTransport::Stdio => {
-                    if server.command.is_empty() {
-                        errors.push(ValidationError {
-                            field: format!("mcp.servers.{}.command", name),
-                            message: "Command required for stdio transport".to_string(),
-                        });
-                    }
-                }
-                McpTransport::Http | McpTransport::Sse => {
-                    if server.url.is_none() {
-                        errors.push(ValidationError {
-                            field: format!("mcp.servers.{}.url", name),
-                            message: "URL required for http/sse transport".to_string(),
-                        });
-                    }
-                }
             }
         }
 

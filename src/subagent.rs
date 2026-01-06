@@ -230,22 +230,7 @@ pub fn run_subagent(
 
     // Get filtered tool schemas
     let schema_opts = tools::SchemaOptions::new(ctx.args.optimize);
-    let tool_schemas = filter_tool_schemas(&spec.allowed_tools, &schema_opts);
-
-    // Also add allowed MCP tools if any
-    let mut all_tool_schemas = tool_schemas;
-    {
-        let mcp_manager = ctx.mcp_manager.borrow();
-        if mcp_manager.has_connected_servers() {
-            for tool_def in mcp_manager.get_all_tools() {
-                let mcp_tool_name = &tool_def.full_name;
-                // Check if this MCP tool is allowed
-                if is_tool_allowed(mcp_tool_name, &spec.allowed_tools) {
-                    all_tool_schemas.push(tool_def.to_openai_schema());
-                }
-            }
-        }
-    }
+    let all_tool_schemas = filter_tool_schemas(&spec.allowed_tools, &schema_opts);
 
     trace(
         ctx,
@@ -455,19 +440,8 @@ pub fn run_subagent(
             );
 
             let result = if allowed {
-                if name.starts_with("mcp.") {
-                    // Execute MCP tool
-                    let mut mcp_manager = ctx.mcp_manager.borrow_mut();
-                    match tools::mcp_dispatch::execute(&mut mcp_manager, name, args.clone()) {
-                        Ok(result) => result,
-                        Err(e) => {
-                            json!({ "error": { "code": "mcp_error", "message": e.to_string() } })
-                        }
-                    }
-                } else {
-                    // Execute built-in tool
-                    tools::execute(name, args.clone(), &ctx.root, &bash_config)?
-                }
+                // Execute built-in tool
+                tools::execute(name, args.clone(), &ctx.root, &bash_config)?
             } else {
                 let reason = match decision {
                     Decision::Deny => "Denied by policy",

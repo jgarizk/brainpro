@@ -4,7 +4,6 @@ pub mod bash;
 pub mod edit;
 mod glob;
 mod grep;
-pub mod mcp_dispatch;
 pub mod plan_mode;
 mod read;
 mod search;

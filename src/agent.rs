@@ -146,17 +146,6 @@ pub fn run_turn(ctx: &Context, user_input: &str, messages: &mut Vec<Value>) -> R
         tools::schemas_with_task(&schema_opts)
     };
 
-    // Only add MCP tools if not in planning mode
-    if !in_planning_mode {
-        let mcp_manager = ctx.mcp_manager.borrow();
-        if mcp_manager.has_connected_servers() {
-            // Add MCP tools to the schema
-            for tool_def in mcp_manager.get_all_tools() {
-                tool_schemas.push(tool_def.to_openai_schema());
-            }
-        }
-    }
-
     // Apply allowed-tools restriction from active skills
     let active_skills = ctx.active_skills.borrow();
     let effective_allowed = active_skills.effective_allowed_tools();
@@ -461,59 +450,6 @@ pub fn run_turn(ctx: &Context, user_input: &str, messages: &mut Vec<Value>) -> R
                     let (task_result, sub_stats) = tools::task::execute(args.clone(), ctx)?;
                     turn_result.stats.merge(&sub_stats);
                     task_result
-                } else if name.starts_with("mcp.") {
-                    // Execute MCP tool
-                    let start = std::time::Instant::now();
-                    let mut mcp_manager = ctx.mcp_manager.borrow_mut();
-
-                    // Log the MCP tool call
-                    let parts: Vec<&str> = name.splitn(3, '.').collect();
-                    let (server, tool_name) = if parts.len() == 3 {
-                        (parts[1], parts[2])
-                    } else {
-                        ("unknown", name.as_str())
-                    };
-                    let _ = ctx
-                        .transcript
-                        .borrow_mut()
-                        .mcp_tool_call(server, tool_name, &args);
-
-                    match tools::mcp_dispatch::execute(&mut mcp_manager, name, args.clone()) {
-                        Ok(result) => {
-                            let duration_ms = start.elapsed().as_millis() as u64;
-                            let truncated = result
-                                .get("truncated")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
-                            let ok = result.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
-                            let _ = ctx.transcript.borrow_mut().mcp_tool_result(
-                                server,
-                                tool_name,
-                                ok,
-                                duration_ms,
-                                truncated,
-                            );
-                            result
-                        }
-                        Err(e) => {
-                            let duration_ms = start.elapsed().as_millis() as u64;
-                            let _ = ctx.transcript.borrow_mut().mcp_tool_result(
-                                server,
-                                tool_name,
-                                false,
-                                duration_ms,
-                                false,
-                            );
-                            // Check if server died
-                            if let Some(exit_status) = mcp_manager.check_server_health(server) {
-                                let _ = ctx
-                                    .transcript
-                                    .borrow_mut()
-                                    .mcp_server_died(server, Some(exit_status));
-                            }
-                            json!({ "error": { "code": "mcp_error", "message": e.to_string() } })
-                        }
-                    }
                 } else if name == "TodoWrite" {
                     // Execute TodoWrite tool
                     tools::todo::execute(args.clone(), &ctx.todo_state)

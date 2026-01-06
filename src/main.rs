@@ -7,7 +7,6 @@ mod config;
 mod cost;
 mod hooks;
 mod llm;
-mod mcp;
 mod model_routing;
 mod plan;
 mod policy;
@@ -228,9 +227,6 @@ fn main() -> Result<()> {
     let auto_yes = args.yes;
     let policy_engine = policy::PolicyEngine::new(cfg.permissions.clone(), print_mode, auto_yes);
 
-    // Create MCP manager from config
-    let mcp_manager = mcp::manager::McpManager::new(cfg.mcp.servers.clone());
-
     // Build skill pack index
     let skill_index = skillpacks::SkillIndex::build(&root);
 
@@ -268,7 +264,6 @@ fn main() -> Result<()> {
         backends: RefCell::new(backends),
         current_target: RefCell::new(None),
         policy: RefCell::new(policy_engine),
-        mcp_manager: RefCell::new(mcp_manager),
         skill_index: RefCell::new(skill_index),
         active_skills: RefCell::new(skillpacks::ActiveSkills::new()),
         model_router: RefCell::new(model_router),
