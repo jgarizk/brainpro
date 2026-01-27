@@ -471,6 +471,11 @@ async fn handle_chat_send(
                 send_response(tx, &response);
                 None
             }
+            AgentEventType::TokenDelta { text } => Some(ClientEvent::new(
+                events::AGENT_TOKEN_DELTA,
+                json!({ "text": text }),
+                Some(session_id.to_string()),
+            )),
             AgentEventType::Pong => None,
         };
 
@@ -679,6 +684,11 @@ async fn handle_turn_resume(
                 send_response(tx, &response);
                 None
             }
+            AgentEventType::TokenDelta { text } => Some(ClientEvent::new(
+                events::AGENT_TOKEN_DELTA,
+                json!({ "text": text }),
+                Some(session_id.to_string()),
+            )),
             AgentEventType::Pong => None,
         };
 

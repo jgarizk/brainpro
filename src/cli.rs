@@ -170,7 +170,7 @@ fn print_stats(duration: Duration, stats: &CommandStats, cost: Option<f64>) {
     }
 }
 
-pub fn run_once(ctx: &Context, prompt: &str) -> Result<()> {
+pub async fn run_once(ctx: &Context, prompt: &str) -> Result<()> {
     // Run UserPromptSubmit hooks
     let (proceed, updated_prompt) = ctx.hooks.borrow().user_prompt_submit(prompt);
     if !proceed {
@@ -189,7 +189,7 @@ pub fn run_once(ctx: &Context, prompt: &str) -> Result<()> {
     let start = Instant::now();
     let mut messages = Vec::new();
     let mut rl = DefaultEditor::new()?;
-    let result = agent::run_turn(ctx, prompt, &mut messages)?;
+    let result = agent::run_turn(ctx, prompt, &mut messages).await?;
 
     let mut total_stats = result.stats.clone();
     let mut current_result = result;
@@ -205,7 +205,7 @@ pub fn run_once(ctx: &Context, prompt: &str) -> Result<()> {
                 }));
 
                 current_result =
-                    agent::run_turn(ctx, "[User answered questions above]", &mut messages)?;
+                    agent::run_turn(ctx, "[User answered questions above]", &mut messages).await?;
                 total_stats.merge(&current_result.stats);
             }
             Err(e) => {
@@ -226,7 +226,7 @@ pub fn run_once(ctx: &Context, prompt: &str) -> Result<()> {
     while current_result.force_continue {
         if let Some(continue_prompt) = current_result.continue_prompt.take() {
             println!("[Continuing due to Stop hook...]");
-            current_result = agent::run_turn(ctx, &continue_prompt, &mut messages)?;
+            current_result = agent::run_turn(ctx, &continue_prompt, &mut messages).await?;
             total_stats.merge(&current_result.stats);
         } else {
             break;
@@ -249,7 +249,7 @@ pub fn run_once(ctx: &Context, prompt: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn run_repl(ctx: Context, initial_messages: Option<Vec<serde_json::Value>>) -> Result<()> {
+pub async fn run_repl(ctx: Context, initial_messages: Option<Vec<serde_json::Value>>) -> Result<()> {
     let mut rl = DefaultEditor::new()?;
     let mut messages = initial_messages.unwrap_or_default();
 
@@ -273,7 +273,7 @@ pub fn run_repl(ctx: Context, initial_messages: Option<Vec<serde_json::Value>>) 
                 rl.add_history_entry(line)?;
 
                 if line.starts_with('/') {
-                    if handle_command(&ctx, line, &mut messages) {
+                    if handle_command_async(&ctx, line, &mut messages).await {
                         break;
                     }
                     continue;
@@ -295,29 +295,26 @@ pub fn run_repl(ctx: Context, initial_messages: Option<Vec<serde_json::Value>>) 
                 };
 
                 let start = Instant::now();
-                match agent::run_turn(&ctx, &line, &mut messages) {
+                match agent::run_turn(&ctx, &line, &mut messages).await {
                     Ok(result) => {
                         let mut total_stats = result.stats.clone();
                         let mut current_result = result;
 
                         // Handle pending questions - loop until all questions are answered
                         while let Some(pending) = current_result.pending_question.take() {
-                            // Display questions and collect answers
                             match ask_user::display_and_collect(&pending.questions, &mut rl) {
                                 Ok(answers) => {
-                                    // Inject the answer as a tool result
                                     messages.push(serde_json::json!({
                                         "role": "tool",
                                         "tool_call_id": pending.tool_call_id,
                                         "content": serde_json::to_string(&answers).unwrap_or_default()
                                     }));
 
-                                    // Continue the agent with the answers
                                     match agent::run_turn(
                                         &ctx,
                                         "[User answered questions above]",
                                         &mut messages,
-                                    ) {
+                                    ).await {
                                         Ok(continuation) => {
                                             total_stats.merge(&continuation.stats);
                                             current_result = continuation;
@@ -330,7 +327,6 @@ pub fn run_repl(ctx: Context, initial_messages: Option<Vec<serde_json::Value>>) 
                                 }
                                 Err(e) => {
                                     eprintln!("Input error: {}", e);
-                                    // Push an error result so agent knows the question failed
                                     messages.push(serde_json::json!({
                                         "role": "tool",
                                         "tool_call_id": pending.tool_call_id,
@@ -343,11 +339,11 @@ pub fn run_repl(ctx: Context, initial_messages: Option<Vec<serde_json::Value>>) 
                             }
                         }
 
-                        // Handle force_continue - loop until no more continuations requested
+                        // Handle force_continue
                         while current_result.force_continue {
                             if let Some(continue_prompt) = current_result.continue_prompt.take() {
                                 println!("[Continuing due to Stop hook...]");
-                                match agent::run_turn(&ctx, &continue_prompt, &mut messages) {
+                                match agent::run_turn(&ctx, &continue_prompt, &mut messages).await {
                                     Ok(continuation) => {
                                         total_stats.merge(&continuation.stats);
                                         current_result = continuation;
@@ -362,7 +358,7 @@ pub fn run_repl(ctx: Context, initial_messages: Option<Vec<serde_json::Value>>) 
                             }
                         }
 
-                        // Get cost for this turn if cost tracking is enabled
+                        // Get cost for this turn
                         let cost = if ctx.config.borrow().cost_tracking.display_in_stats {
                             let costs = ctx.session_costs.borrow();
                             costs
@@ -388,13 +384,13 @@ pub fn run_repl(ctx: Context, initial_messages: Option<Vec<serde_json::Value>>) 
         }
     }
 
-    // Save command history (create parent directory if needed)
+    // Save command history
     if let Some(parent) = history_file.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = rl.save_history(&history_file);
 
-    // Save session if there are messages
+    // Save session
     if !messages.is_empty() {
         let turn_count = *ctx.turn_counter.borrow();
         let _ = session::save_session(&ctx.session_id, &messages, turn_count);
@@ -403,7 +399,7 @@ pub fn run_repl(ctx: Context, initial_messages: Option<Vec<serde_json::Value>>) 
     Ok(())
 }
 
-fn handle_command(ctx: &Context, cmd: &str, messages: &mut Vec<serde_json::Value>) -> bool {
+async fn handle_command_async(ctx: &Context, cmd: &str, messages: &mut Vec<serde_json::Value>) -> bool {
     let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
     match parts[0] {
         "/exit" | "/quit" => return true,
@@ -551,13 +547,13 @@ fn handle_command(ctx: &Context, cmd: &str, messages: &mut Vec<serde_json::Value
             handle_skillpack_command(ctx, if parts.len() > 1 { parts[1] } else { "" });
         }
         "/plan" => {
-            handle_plan_command(ctx, if parts.len() > 1 { parts[1] } else { "" }, messages);
+            handle_plan_command_async(ctx, if parts.len() > 1 { parts[1] } else { "" }, messages).await;
         }
         _ => {
             // Check for user-defined slash commands
             let cmd_name = &parts[0][1..]; // Remove leading /
             let args = if parts.len() > 1 { parts[1] } else { "" };
-            if !try_run_slash_command(ctx, cmd_name, args, messages) {
+            if !try_run_slash_command_async(ctx, cmd_name, args, messages).await {
                 println!("Unknown command: {}", parts[0]);
             }
         }
@@ -889,13 +885,12 @@ fn handle_skillpack_command(ctx: &Context, args: &str) {
     }
 }
 
-fn handle_plan_command(ctx: &Context, args: &str, messages: &mut Vec<serde_json::Value>) {
+async fn handle_plan_command_async(ctx: &Context, args: &str, messages: &mut Vec<serde_json::Value>) {
     let parts: Vec<&str> = args.splitn(2, ' ').collect();
     let subcommand = parts.first().copied().unwrap_or("");
 
     match subcommand {
         "" => {
-            // Show current plan status or help
             let state = ctx.plan_mode.borrow();
             if state.active {
                 if let Some(plan) = &state.current_plan {
@@ -919,7 +914,7 @@ fn handle_plan_command(ctx: &Context, args: &str, messages: &mut Vec<serde_json:
         }
 
         "execute" => {
-            handle_plan_execute(ctx, messages);
+            handle_plan_execute_async(ctx, messages).await;
         }
 
         "save" => {
@@ -945,7 +940,7 @@ fn handle_plan_command(ctx: &Context, args: &str, messages: &mut Vec<serde_json:
 
         "run" => {
             if let Some(name) = parts.get(1) {
-                handle_plan_run(ctx, name.trim(), messages);
+                handle_plan_run_async(ctx, name.trim(), messages).await;
             } else {
                 println!("Usage: /plan run <name>");
             }
@@ -960,20 +955,18 @@ fn handle_plan_command(ctx: &Context, args: &str, messages: &mut Vec<serde_json:
         }
 
         _ => {
-            // Treat as a task description - enter planning mode
             let goal = args.to_string();
-            handle_plan_start(ctx, goal, messages);
+            handle_plan_start_async(ctx, goal, messages).await;
         }
     }
 }
 
-fn handle_plan_start(ctx: &Context, goal: String, messages: &mut Vec<serde_json::Value>) {
+async fn handle_plan_start_async(ctx: &Context, goal: String, messages: &mut Vec<serde_json::Value>) {
     if goal.is_empty() {
         println!("Usage: /plan <task description>");
         return;
     }
 
-    // Check if already in plan mode
     {
         let state = ctx.plan_mode.borrow();
         if state.active {
@@ -982,25 +975,21 @@ fn handle_plan_start(ctx: &Context, goal: String, messages: &mut Vec<serde_json:
         }
     }
 
-    // Enter planning mode
     ctx.plan_mode.borrow_mut().enter_planning(goal.clone());
     println!("[Plan Mode] Entering planning mode...");
     println!("[Plan Mode] Goal: {}", goal);
     println!("[Plan Mode] Using read-only tools to explore the codebase...\n");
 
-    // Log to transcript
     let _ = ctx.transcript.borrow_mut().plan_mode_start(&goal);
 
-    // Increment turn counter for plan mode
     let turn_number = {
         let mut counter = ctx.turn_counter.borrow_mut();
         *counter += 1;
         *counter
     };
 
-    // Run the planning turn
     let start = Instant::now();
-    match agent::run_turn(ctx, &goal, messages) {
+    match agent::run_turn(ctx, &goal, messages).await {
         Ok(result) => {
             let cost = if ctx.config.borrow().cost_tracking.display_in_stats {
                 let costs = ctx.session_costs.borrow();
@@ -1014,7 +1003,6 @@ fn handle_plan_start(ctx: &Context, goal: String, messages: &mut Vec<serde_json:
             };
             print_stats(start.elapsed(), &result.stats, cost);
 
-            // Check if we got a plan
             let state = ctx.plan_mode.borrow();
             if let Some(plan) = &state.current_plan {
                 if !plan.steps.is_empty() {
@@ -1033,8 +1021,7 @@ fn handle_plan_start(ctx: &Context, goal: String, messages: &mut Vec<serde_json:
     }
 }
 
-fn handle_plan_execute(ctx: &Context, messages: &mut Vec<serde_json::Value>) {
-    // Check if we have a plan to execute
+async fn handle_plan_execute_async(ctx: &Context, messages: &mut Vec<serde_json::Value>) {
     {
         let state = ctx.plan_mode.borrow();
         if !state.active || state.current_plan.is_none() {
@@ -1043,13 +1030,10 @@ fn handle_plan_execute(ctx: &Context, messages: &mut Vec<serde_json::Value>) {
         }
     }
 
-    // Enter executing phase
     ctx.plan_mode.borrow_mut().enter_executing();
     println!("[Plan Mode] Starting plan execution...\n");
 
-    // Execute steps one at a time
     loop {
-        // Get next step
         let next_step = {
             let state = ctx.plan_mode.borrow();
             state
@@ -1060,7 +1044,6 @@ fn handle_plan_execute(ctx: &Context, messages: &mut Vec<serde_json::Value>) {
         };
 
         let Some(step) = next_step else {
-            // All steps done
             let state = ctx.plan_mode.borrow();
             if let Some(plan) = &state.current_plan {
                 println!("\n[Plan Mode] Plan execution complete!");
@@ -1070,7 +1053,6 @@ fn handle_plan_execute(ctx: &Context, messages: &mut Vec<serde_json::Value>) {
                     plan.failed_count()
                 );
 
-                // Log completion
                 let _ = ctx.transcript.borrow_mut().plan_complete(
                     &plan.name,
                     plan.completed_count(),
@@ -1091,7 +1073,6 @@ fn handle_plan_execute(ctx: &Context, messages: &mut Vec<serde_json::Value>) {
         }
         println!();
 
-        // Mark step as in progress
         {
             let mut state = ctx.plan_mode.borrow_mut();
             if let Some(plan) = &mut state.current_plan {
@@ -1101,7 +1082,6 @@ fn handle_plan_execute(ctx: &Context, messages: &mut Vec<serde_json::Value>) {
             }
         }
 
-        // Log step start
         let plan_name = ctx
             .plan_mode
             .borrow()
@@ -1114,7 +1094,6 @@ fn handle_plan_execute(ctx: &Context, messages: &mut Vec<serde_json::Value>) {
             .borrow_mut()
             .plan_step_start(&plan_name, step.number, &step.title);
 
-        // Build prompt for this step
         let prompt = format!(
             "Execute Step {}: {}\n\n{}\n\nFiles to work with: {}",
             step.number,
@@ -1127,18 +1106,15 @@ fn handle_plan_execute(ctx: &Context, messages: &mut Vec<serde_json::Value>) {
             }
         );
 
-        // Increment turn counter for plan step
         let turn_number = {
             let mut counter = ctx.turn_counter.borrow_mut();
             *counter += 1;
             *counter
         };
 
-        // Execute the step
         let start = Instant::now();
-        let turn_result = agent::run_turn(ctx, &prompt, messages);
+        let turn_result = agent::run_turn(ctx, &prompt, messages).await;
 
-        // Update step status based on result
         let step_status = if turn_result.is_ok() {
             plan::PlanStepStatus::Completed
         } else {
@@ -1154,7 +1130,6 @@ fn handle_plan_execute(ctx: &Context, messages: &mut Vec<serde_json::Value>) {
             }
         }
 
-        // Log step end
         let _ = ctx.transcript.borrow_mut().plan_step_end(
             &plan_name,
             step.number,
@@ -1185,7 +1160,6 @@ fn handle_plan_execute(ctx: &Context, messages: &mut Vec<serde_json::Value>) {
             }
         }
 
-        // Ask user to continue
         print!("Continue with next step? [Y/n]: ");
         use std::io::{self, Write};
         let _ = io::stdout().flush();
@@ -1304,13 +1278,11 @@ fn handle_plan_load(ctx: &Context, name: &str) {
     }
 }
 
-fn handle_plan_run(ctx: &Context, name: &str, messages: &mut Vec<serde_json::Value>) {
-    // Load the plan first
+async fn handle_plan_run_async(ctx: &Context, name: &str, messages: &mut Vec<serde_json::Value>) {
     handle_plan_load(ctx, name);
 
-    // If loaded successfully, execute it
     if ctx.plan_mode.borrow().active {
-        handle_plan_execute(ctx, messages);
+        handle_plan_execute_async(ctx, messages).await;
     }
 }
 
@@ -1411,9 +1383,8 @@ fn handle_commands_list(ctx: &Context) {
     }
 }
 
-/// Try to run a user-defined slash command
-/// Returns true if a command was found and executed
-fn try_run_slash_command(
+/// Try to run a user-defined slash command (async)
+async fn try_run_slash_command_async(
     ctx: &Context,
     cmd_name: &str,
     args: &str,
@@ -1428,7 +1399,6 @@ fn try_run_slash_command(
         return false;
     };
 
-    // Expand the command with arguments
     let prompt = command.expand(args);
 
     println!("Running command: /{}", cmd_name);
@@ -1436,7 +1406,6 @@ fn try_run_slash_command(
         println!("Expanded prompt: {}", prompt);
     }
 
-    // Run UserPromptSubmit hooks
     let (proceed, updated_prompt) = ctx.hooks.borrow().user_prompt_submit(&prompt);
     if !proceed {
         eprintln!("Command blocked by hook");
@@ -1444,23 +1413,20 @@ fn try_run_slash_command(
     }
     let prompt = updated_prompt.unwrap_or(prompt);
 
-    // Increment turn counter
     let turn_number = {
         let mut counter = ctx.turn_counter.borrow_mut();
         *counter += 1;
         *counter
     };
 
-    // Run the command as a regular prompt
     let start = Instant::now();
-    match agent::run_turn(ctx, &prompt, messages) {
+    match agent::run_turn(ctx, &prompt, messages).await {
         Ok(result) => {
-            // Handle force_continue
             let mut total_stats = result.stats.clone();
             if result.force_continue {
                 if let Some(continue_prompt) = result.continue_prompt {
                     println!("[Continuing due to Stop hook...]");
-                    if let Ok(continuation) = agent::run_turn(ctx, &continue_prompt, messages) {
+                    if let Ok(continuation) = agent::run_turn(ctx, &continue_prompt, messages).await {
                         total_stats.merge(&continuation.stats);
                     }
                 }

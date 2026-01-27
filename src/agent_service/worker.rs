@@ -213,7 +213,7 @@ fn run_turn_task(request: AgentRequest, event_tx: mpsc::Sender<AgentEvent>) -> R
     }
 
     // Run the agent turn
-    match crate::agent::run_turn(&ctx, &user_input, &mut messages) {
+    match crate::agent::run_turn_sync(&ctx, &user_input, &mut messages) {
         Ok(result) => {
             // Send content event if there's response text
             if let Some(text) = &result.response_text {

@@ -1,5 +1,5 @@
 use crate::config::{BackendConfig, Config};
-use crate::llm::Client;
+use crate::llm::{Client, StreamingClient};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
@@ -8,6 +8,7 @@ use std::collections::HashMap;
 pub struct BackendRegistry {
     backends: HashMap<String, BackendConfig>,
     clients: HashMap<String, Client>,
+    streaming_clients: HashMap<String, StreamingClient>,
 }
 
 impl BackendRegistry {
@@ -16,6 +17,7 @@ impl BackendRegistry {
         Self {
             backends: config.backends.clone(),
             clients: HashMap::new(),
+            streaming_clients: HashMap::new(),
         }
     }
 
@@ -46,6 +48,32 @@ impl BackendRegistry {
         }
 
         Ok(self.clients.get(backend).unwrap())
+    }
+
+    /// Get or create a streaming client for a backend.
+    pub fn get_streaming_client(&mut self, backend: &str) -> Result<&StreamingClient> {
+        if !self.streaming_clients.contains_key(backend) {
+            let config = self
+                .backends
+                .get(backend)
+                .ok_or_else(|| anyhow!("Unknown backend: {}", backend))?;
+
+            let api_key = config.resolve_api_key().map_err(|_| {
+                anyhow!(
+                    "No API key for backend '{}'. Set {} or configure api_key in config.",
+                    backend,
+                    config
+                        .api_key_env
+                        .as_deref()
+                        .unwrap_or("the appropriate env var")
+                )
+            })?;
+
+            let client = StreamingClient::new(&config.base_url, api_key);
+            self.streaming_clients.insert(backend.to_string(), client);
+        }
+
+        Ok(self.streaming_clients.get(backend).unwrap())
     }
 
     /// List all configured backends

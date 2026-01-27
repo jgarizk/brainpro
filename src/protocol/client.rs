@@ -166,6 +166,7 @@ pub mod methods {
 /// Event names for server push
 pub mod events {
     pub const AGENT_THINKING: &str = "agent.thinking";
+    pub const AGENT_TOKEN_DELTA: &str = "agent.token_delta";
     pub const AGENT_TOOL_CALL: &str = "agent.tool_call";
     pub const AGENT_TOOL_RESULT: &str = "agent.tool_result";
     pub const AGENT_MESSAGE: &str = "agent.message";

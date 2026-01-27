@@ -83,6 +83,8 @@ pub struct AgentEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEventType {
+    /// Streaming token delta (real-time text)
+    TokenDelta { text: String },
     /// Agent is thinking (content before tool calls)
     Thinking { content: String },
     /// Agent is calling a tool
@@ -137,6 +139,15 @@ pub struct UsageStats {
 }
 
 impl AgentEvent {
+    pub fn token_delta(id: &str, text: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            event: AgentEventType::TokenDelta {
+                text: text.to_string(),
+            },
+        }
+    }
+
     pub fn thinking(id: &str, content: &str) -> Self {
         Self {
             id: id.to_string(),

@@ -32,7 +32,8 @@ use clap::Parser;
 use cli::Args;
 use std::cell::RefCell;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     let args = Args::parse();
 
@@ -216,7 +217,7 @@ fn main() -> Result<()> {
     ctx.hooks.borrow().on_session_start(session_mode);
 
     if let Some(prompt) = &ctx.args.prompt {
-        cli::run_once(&ctx, prompt)
+        cli::run_once(&ctx, prompt).await
     } else {
         // Handle session resume
         let initial_messages = if let Some(resume_id) = &ctx.args.resume {
@@ -234,6 +235,6 @@ fn main() -> Result<()> {
         } else {
             None
         };
-        cli::run_repl(ctx, initial_messages)
+        cli::run_repl(ctx, initial_messages).await
     }
 }

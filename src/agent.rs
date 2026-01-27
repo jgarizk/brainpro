@@ -2,13 +2,14 @@
 
 use crate::{
     cli::Context,
-    llm::{self, LlmClient},
+    llm::{self, LlmClient, StreamEvent},
     plan::{self, PlanPhase},
     policy::Decision,
     tool_display, tools,
 };
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::io::{self, Write};
 
 const MAX_ITERATIONS: usize = 12;
 
@@ -73,7 +74,8 @@ fn verbose(ctx: &Context, message: &str) {
     }
 }
 
-pub fn run_turn(ctx: &Context, user_input: &str, messages: &mut Vec<Value>) -> Result<TurnResult> {
+/// Sync wrapper for worker.rs compatibility (deprecated - will be removed)
+pub fn run_turn_sync(ctx: &Context, user_input: &str, messages: &mut Vec<Value>) -> Result<TurnResult> {
     let mut turn_result = TurnResult::default();
     let mut collected_response = String::new();
     let _ = ctx.transcript.borrow_mut().user_message(user_input);
@@ -563,6 +565,517 @@ pub fn run_turn(ctx: &Context, user_input: &str, messages: &mut Vec<Value>) -> R
     }
 
     // Store collected response text
+    if !collected_response.is_empty() {
+        turn_result.response_text = Some(collected_response);
+    }
+
+    Ok(turn_result)
+}
+
+/// Run a turn with streaming output.
+/// Content deltas are printed to stdout in real-time.
+pub async fn run_turn(
+    ctx: &Context,
+    user_input: &str,
+    messages: &mut Vec<Value>,
+) -> Result<TurnResult> {
+    let mut turn_result = TurnResult::default();
+    let mut collected_response = String::new();
+    let _ = ctx.transcript.borrow_mut().user_message(user_input);
+
+    messages.push(json!({
+        "role": "user",
+        "content": user_input
+    }));
+
+    // Resolve target
+    let target = {
+        let current = ctx.current_target.borrow();
+        if let Some(t) = current.as_ref() {
+            t.clone()
+        } else {
+            ctx.config
+                .borrow()
+                .get_default_target()
+                .ok_or_else(|| anyhow::anyhow!("No target configured. Use --target or /target"))?
+        }
+    };
+    let bash_config = ctx.config.borrow().bash.clone();
+
+    trace(ctx, "TARGET", &target.to_string());
+
+    let plan_phase = ctx.plan_mode.borrow().phase;
+    let in_planning_mode = plan_phase == PlanPhase::Planning;
+
+    // Handle skill auto-activation (same as sync version)
+    for word in user_input.split_whitespace() {
+        if word.starts_with('$') && word.len() > 1 {
+            let skill_name =
+                &word[1..].trim_end_matches(|c: char| !c.is_alphanumeric() && c != '-');
+            let index = ctx.skill_index.borrow();
+            if index.get(skill_name).is_some() {
+                let active = ctx.active_skills.borrow();
+                if active.get(skill_name).is_none() {
+                    drop(active);
+                    let mut active = ctx.active_skills.borrow_mut();
+                    if let Ok(activation) = active.activate(skill_name, &index) {
+                        let _ = ctx.transcript.borrow_mut().skill_activate(
+                            &activation.name,
+                            Some("auto-activated from $mention"),
+                            activation.allowed_tools.as_ref(),
+                        );
+                        trace(ctx, "SKILL", &format!("Auto-activated: {}", skill_name));
+                    }
+                }
+            }
+        }
+    }
+
+    // Build tool schemas
+    let schema_opts = tools::SchemaOptions::new(ctx.args.optimize);
+    let mut tool_schemas = if in_planning_mode {
+        tools::schemas(&schema_opts)
+            .into_iter()
+            .filter(|schema| {
+                if let Some(name) = schema
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                {
+                    matches!(name, "Read" | "Glob" | "Search")
+                } else {
+                    false
+                }
+            })
+            .collect()
+    } else {
+        tools::schemas_with_task(&schema_opts)
+    };
+
+    // Apply allowed-tools restriction
+    let active_skills = ctx.active_skills.borrow();
+    let effective_allowed = active_skills.effective_allowed_tools();
+    drop(active_skills);
+
+    if let Some(allowed) = &effective_allowed {
+        tool_schemas.retain(|schema| {
+            if let Some(name) = schema
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+            {
+                if name == "ActivateSkill" || name == "Task" {
+                    return true;
+                }
+                allowed.iter().any(|a| a == name)
+            } else {
+                false
+            }
+        });
+    }
+
+    let max_iterations = ctx.args.max_turns.unwrap_or(MAX_ITERATIONS);
+
+    for iteration in 1..=max_iterations {
+        trace(ctx, "ITER", &format!("Starting iteration {}", iteration));
+
+        // Get streaming client and make request
+        let response = {
+            let mut backends = ctx.backends.borrow_mut();
+            let client = backends.get_streaming_client(&target.backend)?;
+
+            let mut system_prompt = if in_planning_mode {
+                plan::PLAN_MODE_SYSTEM_PROMPT.to_string()
+            } else {
+                SYSTEM_PROMPT.to_string()
+            };
+
+            if ctx.args.optimize {
+                system_prompt.push_str("\n\nAI-to-AI mode. Maximum information density. Structure over prose. No narration.");
+            }
+
+            let skill_index = ctx.skill_index.borrow();
+            let skill_prompt = skill_index.format_for_prompt(50);
+            drop(skill_index);
+            if !skill_prompt.is_empty() {
+                system_prompt.push_str("\n\n");
+                system_prompt.push_str(&skill_prompt);
+            }
+
+            let active_skills = ctx.active_skills.borrow();
+            if !active_skills.is_empty() {
+                system_prompt.push_str("\n\n");
+                system_prompt.push_str(&active_skills.format_for_conversation());
+            }
+            drop(active_skills);
+
+            let mut req_messages = vec![json!({
+                "role": "system",
+                "content": system_prompt
+            })];
+            req_messages.extend(messages.clone());
+
+            let request = llm::ChatRequest {
+                model: target.model.clone(),
+                messages: req_messages,
+                tools: Some(tool_schemas.clone()),
+                tool_choice: Some("auto".to_string()),
+            };
+
+            // Create channel for streaming events
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
+
+            // Spawn the streaming request
+            let response_future = client.chat_stream(&request, event_tx);
+
+            // Process events as they arrive
+            let mut iteration_content = String::new();
+            let response = tokio::select! {
+                result = response_future => result?,
+                _ = async {
+                    while let Some(event) = event_rx.recv().await {
+                        match event {
+                            StreamEvent::ContentDelta(delta) => {
+                                // Print delta immediately
+                                print!("{}", delta);
+                                let _ = io::stdout().flush();
+                                iteration_content.push_str(&delta);
+                            }
+                            StreamEvent::ToolCallStart { name, .. } => {
+                                trace(ctx, "STREAM", &format!("Tool call starting: {}", name));
+                            }
+                            StreamEvent::ToolCallDelta { .. } => {
+                                // Tool call args being streamed
+                            }
+                            StreamEvent::Done { .. } => {
+                                break;
+                            }
+                        }
+                    }
+                    // This future never returns on its own
+                    futures::future::pending::<()>().await
+                } => unreachable!(),
+            };
+
+            // Drain remaining events
+            while let Ok(event) = event_rx.try_recv() {
+                if let StreamEvent::ContentDelta(delta) = event {
+                    print!("{}", delta);
+                    let _ = io::stdout().flush();
+                    iteration_content.push_str(&delta);
+                }
+            }
+
+            // Add newline after streaming content
+            if !iteration_content.is_empty() {
+                println!();
+            }
+
+            response
+        };
+
+        // Track token usage
+        if let Some(usage) = &response.usage {
+            turn_result.stats.input_tokens += usage.prompt_tokens;
+            turn_result.stats.output_tokens += usage.completion_tokens;
+
+            let turn_number = *ctx.turn_counter.borrow();
+            let op = ctx.session_costs.borrow_mut().record_operation(
+                turn_number,
+                &target.model,
+                usage.prompt_tokens,
+                usage.completion_tokens,
+            );
+
+            let _ = ctx.transcript.borrow_mut().token_usage(
+                &target.model,
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                op.cost_usd,
+            );
+        }
+
+        if response.choices.is_empty() {
+            break;
+        }
+
+        let choice = &response.choices[0];
+        let msg = &choice.message;
+
+        if choice.finish_reason.as_deref() == Some("length") {
+            eprintln!(
+                "⚠️  Response truncated (max tokens reached). Consider increasing max_tokens or using /compact."
+            );
+        }
+
+        // Content already streamed, but add to collected response
+        if let Some(content) = &msg.content {
+            if !content.is_empty() {
+                if !collected_response.is_empty() {
+                    collected_response.push_str("\n\n");
+                }
+                collected_response.push_str(content);
+                let _ = ctx.transcript.borrow_mut().assistant_message(content);
+
+                // Handle plan mode parsing
+                if in_planning_mode {
+                    let goal = ctx
+                        .plan_mode
+                        .borrow()
+                        .current_plan
+                        .as_ref()
+                        .map(|p| p.goal.clone())
+                        .unwrap_or_default();
+
+                    if let Ok(parsed_plan) = plan::parse_plan_output(content, &goal) {
+                        let mut state = ctx.plan_mode.borrow_mut();
+                        if let Some(current_plan) = &mut state.current_plan {
+                            current_plan.summary = parsed_plan.summary;
+                            current_plan.steps = parsed_plan.steps;
+                            current_plan.status = plan::PlanStatus::Ready;
+                        }
+                        state.enter_review();
+
+                        let plan_name = state
+                            .current_plan
+                            .as_ref()
+                            .map(|p| p.name.clone())
+                            .unwrap_or_default();
+                        let step_count = state
+                            .current_plan
+                            .as_ref()
+                            .map(|p| p.steps.len())
+                            .unwrap_or(0);
+                        drop(state);
+                        let _ = ctx
+                            .transcript
+                            .borrow_mut()
+                            .plan_created(&plan_name, step_count);
+                    }
+                }
+            }
+        }
+
+        let tool_calls = match &msg.tool_calls {
+            Some(tc) if !tc.is_empty() => {
+                if let Some(content) = &msg.content {
+                    if !content.is_empty() {
+                        trace(ctx, "THINK", content);
+                    }
+                }
+                tc
+            }
+            _ => {
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": msg.content
+                }));
+                break;
+            }
+        };
+
+        let assistant_msg = json!({
+            "role": "assistant",
+            "content": msg.content,
+            "tool_calls": tool_calls
+        });
+        messages.push(assistant_msg);
+
+        // Process tool calls (same as sync version)
+        for tc in tool_calls {
+            let name = &tc.function.name;
+            let args: Value = serde_json::from_str(&tc.function.arguments).unwrap_or(json!({}));
+
+            turn_result.stats.tool_uses += 1;
+
+            trace(
+                ctx,
+                "CALL",
+                &format!(
+                    "{}({})",
+                    name,
+                    serde_json::to_string_pretty(&args).unwrap_or_default()
+                ),
+            );
+
+            verbose(
+                ctx,
+                &format!("Tool call: {}({})", name, tc.function.arguments),
+            );
+
+            eprintln!("{}", tool_display::format_tool_call(name, &args));
+
+            let _ = ctx.transcript.borrow_mut().tool_call(name, &args);
+
+            let (allowed, decision, matched_rule) =
+                ctx.policy.borrow().check_permission(name, &args);
+
+            let decision_str = match decision {
+                Decision::Allow => "allowed",
+                Decision::Deny => "denied",
+                Decision::Ask => {
+                    if allowed {
+                        "prompted_yes"
+                    } else {
+                        "prompted_no"
+                    }
+                }
+            };
+            let _ = ctx.transcript.borrow_mut().policy_decision(
+                name,
+                decision_str,
+                matched_rule.as_deref(),
+            );
+
+            let (hook_proceed, updated_args) = ctx.hooks.borrow().pre_tool_use(name, &args);
+            let args = updated_args.unwrap_or(args);
+
+            let tool_start = std::time::Instant::now();
+
+            let result = if !hook_proceed {
+                json!({
+                    "error": {
+                        "code": "hook_blocked",
+                        "message": "Blocked by PreToolUse hook"
+                    }
+                })
+            } else if allowed {
+                if name == "ActivateSkill" {
+                    let skill_name = args["name"].as_str().unwrap_or("");
+                    let reason = args["reason"].as_str();
+
+                    if skill_name.is_empty() {
+                        json!({
+                            "error": {
+                                "code": "missing_name",
+                                "message": "Missing required 'name' parameter"
+                            }
+                        })
+                    } else {
+                        let skill_index = ctx.skill_index.borrow();
+                        let mut active_skills = ctx.active_skills.borrow_mut();
+                        match active_skills.activate(skill_name, &skill_index) {
+                            Ok(activation) => {
+                                let _ = ctx.transcript.borrow_mut().skill_activate(
+                                    &activation.name,
+                                    reason,
+                                    activation.allowed_tools.as_ref(),
+                                );
+                                json!({
+                                    "ok": true,
+                                    "name": activation.name,
+                                    "description": activation.description,
+                                    "allowed_tools": activation.allowed_tools,
+                                    "instructions_loaded": true,
+                                    "message": format!("Skill '{}' activated. Instructions loaded.", activation.name)
+                                })
+                            }
+                            Err(e) => {
+                                json!({
+                                    "error": {
+                                        "code": "activation_failed",
+                                        "message": e.to_string()
+                                    }
+                                })
+                            }
+                        }
+                    }
+                } else if name == "Task" {
+                    let (task_result, sub_stats) = tools::task::execute(args.clone(), ctx)?;
+                    turn_result.stats.merge(&sub_stats);
+                    task_result
+                } else if name == "TodoWrite" {
+                    tools::todo::execute(args.clone(), &ctx.todo_state)
+                } else if name == "AskUserQuestion" {
+                    match tools::ask_user::validate(&args) {
+                        Ok(questions) => {
+                            turn_result.pending_question = Some(PendingQuestion {
+                                tool_call_id: tc.id.clone(),
+                                questions,
+                            });
+                            json!({
+                                "status": "awaiting_user_input",
+                                "message": "Waiting for user to answer questions"
+                            })
+                        }
+                        Err(error) => error,
+                    }
+                } else if name == "EnterPlanMode" {
+                    let goal = args.get("goal").and_then(|g| g.as_str()).unwrap_or("");
+                    tools::plan_mode::execute_enter(&ctx.plan_mode, goal)
+                } else if name == "ExitPlanMode" {
+                    tools::plan_mode::execute_exit(&ctx.plan_mode)
+                } else {
+                    tools::execute(name, args.clone(), &ctx.root, &bash_config)?
+                }
+            } else {
+                let reason = match decision {
+                    Decision::Deny => "Denied by policy",
+                    _ => "User denied permission",
+                };
+                json!({ "error": { "code": "permission_denied", "message": reason } })
+            };
+
+            let ok = result.get("error").is_none();
+            let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
+            let _ = ctx.transcript.borrow_mut().tool_result(name, ok, &result);
+
+            ctx.hooks
+                .borrow()
+                .post_tool_use(name, &args, &result, tool_duration_ms);
+
+            trace(
+                ctx,
+                "RESULT",
+                &format!(
+                    "{}: {}",
+                    name,
+                    serde_json::to_string_pretty(&result).unwrap_or_default()
+                ),
+            );
+
+            verbose(ctx, &format!("Tool result: {} ok={}", name, ok));
+
+            eprintln!("{}", tool_display::format_tool_result(name, &result));
+
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": serde_json::to_string(&result)?
+            }));
+
+            if turn_result.pending_question.is_some() {
+                break;
+            }
+        }
+
+        if turn_result.pending_question.is_some() {
+            break;
+        }
+    }
+
+    // Run Stop hooks
+    let last_assistant_message = messages.iter().rev().find_map(|m| {
+        if m["role"].as_str() == Some("assistant") {
+            m["content"].as_str().map(|s| s.to_string())
+        } else {
+            None
+        }
+    });
+
+    let (force_continue, continue_prompt) = ctx
+        .hooks
+        .borrow()
+        .on_stop("end_turn", last_assistant_message.as_deref());
+
+    if force_continue && turn_result.pending_question.is_none() {
+        if let Some(prompt) = continue_prompt {
+            turn_result.force_continue = true;
+            turn_result.continue_prompt = Some(prompt);
+            verbose(ctx, "Stop hook requested continuation");
+        }
+    }
+
     if !collected_response.is_empty() {
         turn_result.response_text = Some(collected_response);
     }

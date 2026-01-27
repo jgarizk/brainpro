@@ -85,6 +85,82 @@ pub struct FunctionCall {
     pub arguments: String,
 }
 
+// ============ Streaming Types ============
+
+/// Delta content in a streaming response
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ChoiceDelta {
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ToolCallDelta>>,
+}
+
+/// Partial tool call in a streaming response
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolCallDelta {
+    #[serde(default)]
+    pub index: usize,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(rename = "type", default)]
+    pub call_type: Option<String>,
+    #[serde(default)]
+    pub function: Option<FunctionCallDelta>,
+}
+
+/// Partial function call in a streaming response
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct FunctionCallDelta {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub arguments: Option<String>,
+}
+
+/// A single chunk in a streaming response
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChatCompletionChunk {
+    pub id: String,
+    pub choices: Vec<ChunkChoice>,
+    #[serde(default)]
+    pub usage: Option<Usage>,
+}
+
+/// A choice within a streaming chunk
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChunkChoice {
+    pub index: usize,
+    #[serde(default)]
+    pub delta: ChoiceDelta,
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+}
+
+/// Events emitted during streaming
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// Content text delta
+    ContentDelta(String),
+    /// Start of a new tool call
+    ToolCallStart {
+        index: usize,
+        id: String,
+        name: String,
+    },
+    /// Argument delta for a tool call
+    ToolCallDelta {
+        index: usize,
+        arguments: String,
+    },
+    /// Stream completed with usage info
+    Done {
+        usage: Option<Usage>,
+    },
+}
+
 /// Result of an LLM call including timing and retry info
 #[derive(Debug)]
 pub struct LlmCallResult {
@@ -240,6 +316,211 @@ impl LlmClient for Client {
 
     fn chat_with_metadata(&self, request: &ChatRequest) -> Result<LlmCallResult> {
         self.chat_sync(request)
+    }
+}
+
+// ============ Streaming Client ============
+
+/// Request for streaming chat completions
+#[derive(Debug, Serialize)]
+pub struct StreamingChatRequest {
+    pub model: String,
+    pub messages: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<String>,
+    pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StreamOptions {
+    pub include_usage: bool,
+}
+
+/// Async streaming LLM client
+pub struct StreamingClient {
+    base_url: String,
+    api_key: SecretString,
+    http_client: reqwest::Client,
+}
+
+impl StreamingClient {
+    pub fn new(base_url: &str, api_key: SecretString) -> Self {
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(300)) // Longer timeout for streaming
+            .pool_max_idle_per_host(10)
+            .build()
+            .expect("Failed to create async HTTP client");
+
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key,
+            http_client,
+        }
+    }
+
+    /// Stream chat completions, sending events to the provided channel.
+    /// Accumulates the full response and returns it when complete.
+    pub async fn chat_stream(
+        &self,
+        request: &ChatRequest,
+        event_tx: tokio::sync::mpsc::Sender<StreamEvent>,
+    ) -> Result<ChatResponse> {
+        use futures::StreamExt;
+
+        let url = format!("{}/chat/completions", self.base_url);
+
+        let streaming_request = StreamingChatRequest {
+            model: request.model.clone(),
+            messages: request.messages.clone(),
+            tools: request.tools.clone(),
+            tool_choice: request.tool_choice.clone(),
+            stream: true,
+            stream_options: Some(StreamOptions { include_usage: true }),
+        };
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.api_key.expose_secret()),
+            )
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .json(&streaming_request)
+            .send()
+            .await
+            .map_err(|e| anyhow!("HTTP error: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!("API error {}: {}", status, body));
+        }
+
+        // Accumulate full response
+        let mut content = String::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut final_usage: Option<Usage> = None;
+        let mut finish_reason: Option<String> = None;
+
+        // Parse SSE stream using extension trait
+        use eventsource_stream::Eventsource;
+        let byte_stream = response.bytes_stream();
+        let mut event_stream = byte_stream.eventsource();
+
+        while let Some(event_result) = event_stream.next().await {
+            let event = match event_result {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("[llm] SSE parse error: {}", e);
+                    continue;
+                }
+            };
+
+            let data = event.data.trim();
+
+            // Check for [DONE] sentinel
+            if data == "[DONE]" {
+                break;
+            }
+
+            // Parse JSON chunk
+            let chunk: ChatCompletionChunk = match serde_json::from_str(data) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[llm] JSON parse error: {} in: {}", e, data);
+                    continue;
+                }
+            };
+
+            // Process each choice (usually just one)
+            for choice in &chunk.choices {
+                // Handle content delta
+                if let Some(delta_content) = &choice.delta.content {
+                    if !delta_content.is_empty() {
+                        content.push_str(delta_content);
+                        let _ = event_tx.send(StreamEvent::ContentDelta(delta_content.clone())).await;
+                    }
+                }
+
+                // Handle tool call deltas
+                if let Some(tc_deltas) = &choice.delta.tool_calls {
+                    for tc_delta in tc_deltas {
+                        let idx = tc_delta.index;
+
+                        // Ensure we have a slot for this tool call
+                        while tool_calls.len() <= idx {
+                            tool_calls.push(ToolCall {
+                                id: String::new(),
+                                call_type: "function".to_string(),
+                                function: FunctionCall {
+                                    name: String::new(),
+                                    arguments: String::new(),
+                                },
+                            });
+                        }
+
+                        // Update tool call ID if provided
+                        if let Some(id) = &tc_delta.id {
+                            tool_calls[idx].id = id.clone();
+                        }
+
+                        // Update function details if provided
+                        if let Some(func_delta) = &tc_delta.function {
+                            if let Some(name) = &func_delta.name {
+                                tool_calls[idx].function.name = name.clone();
+                                // Emit tool call start event
+                                let _ = event_tx.send(StreamEvent::ToolCallStart {
+                                    index: idx,
+                                    id: tool_calls[idx].id.clone(),
+                                    name: name.clone(),
+                                }).await;
+                            }
+                            if let Some(args) = &func_delta.arguments {
+                                tool_calls[idx].function.arguments.push_str(args);
+                                let _ = event_tx.send(StreamEvent::ToolCallDelta {
+                                    index: idx,
+                                    arguments: args.clone(),
+                                }).await;
+                            }
+                        }
+                    }
+                }
+
+                // Track finish reason
+                if choice.finish_reason.is_some() {
+                    finish_reason = choice.finish_reason.clone();
+                }
+            }
+
+            // Track usage from the final chunk
+            if chunk.usage.is_some() {
+                final_usage = chunk.usage;
+            }
+        }
+
+        // Send done event
+        let _ = event_tx.send(StreamEvent::Done { usage: final_usage.clone() }).await;
+
+        // Build accumulated response
+        let message = Message {
+            role: "assistant".to_string(),
+            content: if content.is_empty() { None } else { Some(content) },
+            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+        };
+
+        Ok(ChatResponse {
+            choices: vec![Choice {
+                message,
+                finish_reason,
+            }],
+            usage: final_usage,
+        })
     }
 }
 
