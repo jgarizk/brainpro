@@ -25,6 +25,34 @@ pub struct AgentRequest {
     /// Working directory for tool execution
     #[serde(default)]
     pub working_dir: Option<String>,
+    /// Data for resuming a yielded turn
+    #[serde(default)]
+    pub resume_data: Option<ResumeData>,
+}
+
+/// Data for resuming a yielded turn
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResumeData {
+    /// Turn ID being resumed
+    pub turn_id: String,
+    /// Tool call ID that yielded
+    pub tool_call_id: String,
+    /// Whether the tool was approved (for awaiting_approval)
+    #[serde(default)]
+    pub approved: Option<bool>,
+    /// User's answers (for awaiting_input)
+    #[serde(default)]
+    pub answers: Option<Value>,
+}
+
+/// Reason for yielding a turn
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum YieldReason {
+    /// Waiting for tool approval
+    AwaitingApproval,
+    /// Waiting for user input (AskUserQuestion)
+    AwaitingInput,
 }
 
 /// Methods the agent can execute
@@ -33,6 +61,8 @@ pub struct AgentRequest {
 pub enum AgentMethod {
     /// Run a single turn of the agent loop
     RunTurn,
+    /// Resume a yielded turn
+    ResumeTurn,
     /// Cancel an in-flight request
     Cancel,
     /// Health check
@@ -77,6 +107,20 @@ pub enum AgentEventType {
     AwaitingInput {
         tool_call_id: String,
         questions: Vec<Value>,
+    },
+    /// Agent yielded waiting for approval or input
+    Yield {
+        turn_id: String,
+        reason: YieldReason,
+        tool_call_id: String,
+        tool_name: String,
+        tool_args: Value,
+        /// Questions for AskUserQuestion (only for AwaitingInput)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        questions: Option<Vec<Value>>,
+        /// Policy rule that triggered the ask (only for AwaitingApproval)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        policy_rule: Option<String>,
     },
     /// Error occurred
     Error { code: String, message: String },
@@ -176,6 +220,48 @@ impl AgentEvent {
         }
     }
 
+    pub fn yield_approval(
+        id: &str,
+        turn_id: &str,
+        tool_call_id: &str,
+        tool_name: &str,
+        tool_args: Value,
+        policy_rule: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.to_string(),
+            event: AgentEventType::Yield {
+                turn_id: turn_id.to_string(),
+                reason: YieldReason::AwaitingApproval,
+                tool_call_id: tool_call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                tool_args,
+                questions: None,
+                policy_rule,
+            },
+        }
+    }
+
+    pub fn yield_input(
+        id: &str,
+        turn_id: &str,
+        tool_call_id: &str,
+        questions: Vec<Value>,
+    ) -> Self {
+        Self {
+            id: id.to_string(),
+            event: AgentEventType::Yield {
+                turn_id: turn_id.to_string(),
+                reason: YieldReason::AwaitingInput,
+                tool_call_id: tool_call_id.to_string(),
+                tool_name: "AskUserQuestion".to_string(),
+                tool_args: serde_json::json!({}),
+                questions: Some(questions),
+                policy_rule: None,
+            },
+        }
+    }
+
     /// Serialize to NDJSON line (with trailing newline)
     pub fn to_ndjson(&self) -> String {
         let mut json = serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string());
@@ -205,6 +291,7 @@ impl AgentRequest {
             target,
             tools: None,
             working_dir: None,
+            resume_data: None,
         }
     }
 
@@ -218,6 +305,7 @@ impl AgentRequest {
             target: None,
             tools: None,
             working_dir: None,
+            resume_data: None,
         }
     }
 
@@ -231,6 +319,21 @@ impl AgentRequest {
             target: None,
             tools: None,
             working_dir: None,
+            resume_data: None,
+        }
+    }
+
+    /// Create a resume_turn request
+    pub fn resume_turn(id: &str, session_id: &str, resume_data: ResumeData) -> Self {
+        Self {
+            id: id.to_string(),
+            method: AgentMethod::ResumeTurn,
+            session_id: session_id.to_string(),
+            messages: Vec::new(),
+            target: None,
+            tools: None,
+            working_dir: None,
+            resume_data: Some(resume_data),
         }
     }
 }

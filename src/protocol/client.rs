@@ -155,6 +155,7 @@ pub mod methods {
     pub const SESSION_LIST: &str = "session.list";
     pub const SESSION_GET: &str = "session.get";
     pub const TOOL_APPROVE: &str = "tool.approve";
+    pub const TURN_RESUME: &str = "turn.resume";
     pub const CRON_ADD: &str = "cron.add";
     pub const CRON_REMOVE: &str = "cron.remove";
     pub const CRON_LIST: &str = "cron.list";
@@ -170,6 +171,8 @@ pub mod events {
     pub const AGENT_MESSAGE: &str = "agent.message";
     pub const AGENT_DONE: &str = "agent.done";
     pub const AGENT_ERROR: &str = "agent.error";
+    pub const AGENT_AWAITING_APPROVAL: &str = "agent.awaiting_approval";
+    pub const AGENT_AWAITING_INPUT: &str = "agent.awaiting_input";
     pub const PRESENCE_UPDATE: &str = "presence.update";
     pub const HEALTH_TICK: &str = "health.tick";
     pub const CRON_FIRED: &str = "cron.fired";

@@ -4,12 +4,13 @@
 //! from the gateway via a Unix socket and streaming NDJSON events back.
 //!
 //! Usage:
-//!   brainpro-agent [--socket /path/to/socket]
+//!   brainpro-agent [--socket /path/to/socket] [--gateway-mode]
 //!
 //! Environment variables:
 //!   BRAINPRO_AGENT_SOCKET - Path to Unix socket (default: /run/brainpro.sock)
+//!   BRAINPRO_GATEWAY_MODE - Enable gateway mode (yields on ask decisions)
 
-use brainpro::agent_service::server::run_with_socket;
+use brainpro::agent_service::server::{run_gateway_mode, run_with_socket};
 use std::env;
 
 fn main() {
@@ -18,12 +19,20 @@ fn main() {
 
     // Parse socket path from args or environment
     let socket_path = parse_socket_path();
+    let gateway_mode = parse_gateway_mode();
 
     eprintln!("brainpro-agent starting...");
     eprintln!("Socket: {}", socket_path);
+    eprintln!("Gateway mode: {}", gateway_mode);
 
     // Run the server
-    if let Err(e) = run_with_socket(&socket_path) {
+    let result = if gateway_mode {
+        run_gateway_mode(&socket_path)
+    } else {
+        run_with_socket(&socket_path)
+    };
+
+    if let Err(e) = result {
         eprintln!("Fatal error: {}", e);
         std::process::exit(1);
     }
@@ -45,4 +54,22 @@ fn parse_socket_path() -> String {
 
     // Default
     "/run/brainpro.sock".to_string()
+}
+
+fn parse_gateway_mode() -> bool {
+    // Check command line args first
+    let args: Vec<String> = env::args().collect();
+    for arg in &args {
+        if arg == "--gateway-mode" {
+            return true;
+        }
+    }
+
+    // Check environment variable
+    if let Ok(val) = env::var("BRAINPRO_GATEWAY_MODE") {
+        return val == "1" || val.to_lowercase() == "true";
+    }
+
+    // Default: gateway mode enabled (required for permission prompts)
+    true
 }
