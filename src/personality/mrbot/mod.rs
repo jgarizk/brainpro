@@ -3,75 +3,34 @@
 //! MrBot is designed for:
 //! - Gateway/daemon architecture (yield/resume)
 //! - Full toolset including messaging/voice (future)
-//! - SOUL.md persona file support
+//! - Personality loaded from config/personalities/mrbot/
 //! - Modular prompt builder (clawdbot-style)
 
 mod loop_impl;
-mod prompts;
-mod soul;
 
 use crate::agent::TurnResult;
 use crate::cli::Context;
 use crate::config::PermissionMode;
+use crate::personality::loader::{self, PersonalityConfig};
 use crate::personality::{Personality, PromptContext};
 use anyhow::Result;
 use serde_json::Value;
-use std::path::PathBuf;
-
-pub use soul::load_soul;
 
 /// MrBot personality - conversational bot with SOUL
 pub struct MrBot {
-    /// Available tools for MrBot (full toolset)
+    /// Loaded configuration from files
+    config: PersonalityConfig,
+    /// Cached tools as static refs
     tools: Vec<&'static str>,
-    /// Path to SOUL.md file
-    soul_path: Option<PathBuf>,
-    /// Cached SOUL content
-    soul_content: Option<String>,
 }
 
 impl MrBot {
     /// Create a new MrBot personality
     pub fn new() -> Self {
-        Self {
-            tools: vec![
-                "Read",
-                "Write",
-                "Edit",
-                "Glob",
-                "Grep",
-                "Bash",
-                "Search",
-                "Task",
-                "TodoWrite",
-                "AskUserQuestion",
-                "ActivateSkill",
-                "EnterPlanMode",
-                "ExitPlanMode",
-            ],
-            soul_path: None,
-            soul_content: None,
-        }
-    }
-
-    /// Create MrBot with a specific SOUL.md path
-    pub fn with_soul_path(mut self, path: PathBuf) -> Self {
-        self.soul_path = Some(path);
-        self
-    }
-
-    /// Load SOUL content from default locations or specified path
-    pub fn load_soul(&mut self, working_dir: &PathBuf) {
-        if let Some(ref path) = self.soul_path {
-            self.soul_content = soul::load_soul_from_path(path);
-        } else {
-            self.soul_content = soul::load_soul(working_dir);
-        }
-    }
-
-    /// Get the SOUL content
-    pub fn soul_content(&self) -> Option<&str> {
-        self.soul_content.as_deref()
+        let config = loader::load_personality("mrbot")
+            .expect("Failed to load mrbot personality config");
+        let tools = config.tools_as_static();
+        Self { config, tools }
     }
 }
 
@@ -86,8 +45,12 @@ impl Personality for MrBot {
         "MrBot"
     }
 
+    fn config(&self) -> &PersonalityConfig {
+        &self.config
+    }
+
     fn build_system_prompt(&self, ctx: &PromptContext) -> String {
-        prompts::build_system_prompt(ctx)
+        loader::build_system_prompt(&self.config, ctx)
     }
 
     fn run_turn(
@@ -96,7 +59,7 @@ impl Personality for MrBot {
         user_input: &str,
         messages: &mut Vec<Value>,
     ) -> Result<TurnResult> {
-        loop_impl::run_turn(ctx, user_input, messages, self.soul_content.as_deref())
+        loop_impl::run_turn(&self.config, ctx, user_input, messages)
     }
 
     fn available_tools(&self) -> &[&str] {
@@ -104,7 +67,6 @@ impl Personality for MrBot {
     }
 
     fn permission_mode(&self) -> PermissionMode {
-        // MrBot uses default mode by default (gateway handles approvals)
-        PermissionMode::Default
+        self.config.permission_mode.clone()
     }
 }

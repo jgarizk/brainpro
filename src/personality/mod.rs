@@ -4,8 +4,11 @@
 //! - MrCode: Direct CLI, focused coding assistant with minimal toolset
 //! - MrBot: Gateway/Docker path, conversational bot with SOUL.md support
 
+pub mod loader;
 pub mod mrbot;
 pub mod mrcode;
+
+pub use loader::{load_personality, PersonalityConfig};
 
 use crate::agent::TurnResult;
 use crate::cli::Context;
@@ -58,6 +61,9 @@ impl PromptContext {
 pub trait Personality: Send + Sync {
     /// Personality identifier
     fn name(&self) -> &str;
+
+    /// Get the personality configuration (loaded from files)
+    fn config(&self) -> &PersonalityConfig;
 
     /// Build the system prompt for this personality
     fn build_system_prompt(&self, ctx: &PromptContext) -> String;

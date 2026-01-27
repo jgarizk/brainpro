@@ -15,7 +15,7 @@ use crate::{
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use super::prompts;
+use crate::personality::loader::{self, PersonalityConfig};
 
 const MAX_ITERATIONS: usize = 12;
 
@@ -32,7 +32,12 @@ fn verbose(ctx: &Context, message: &str) {
 }
 
 /// Run a single turn of the MrCode agent loop
-pub fn run_turn(ctx: &Context, user_input: &str, messages: &mut Vec<Value>) -> Result<TurnResult> {
+pub fn run_turn(
+    config: &PersonalityConfig,
+    ctx: &Context,
+    user_input: &str,
+    messages: &mut Vec<Value>,
+) -> Result<TurnResult> {
     let mut turn_result = TurnResult::default();
     let mut collected_response = String::new();
     let _ = ctx.transcript.borrow_mut().user_message(user_input);
@@ -143,9 +148,9 @@ pub fn run_turn(ctx: &Context, user_input: &str, messages: &mut Vec<Value>) -> R
             let mut backends = ctx.backends.borrow_mut();
             let client = backends.get_client(&target.backend)?;
 
-            // Build system prompt using MrCode prompts
+            // Build system prompt from personality config
             let prompt_ctx = PromptContext::from_context(ctx);
-            let mut system_prompt = prompts::build_system_prompt(&prompt_ctx);
+            let mut system_prompt = loader::build_system_prompt(config, &prompt_ctx);
 
             // Add skill pack index
             let skill_index = ctx.skill_index.borrow();

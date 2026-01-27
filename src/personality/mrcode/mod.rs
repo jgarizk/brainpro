@@ -3,30 +3,33 @@
 //! MrCode is a direct, terse coding assistant designed for:
 //! - On-demand local agent via Unix socket
 //! - Minimal toolset: Read, Write, Edit, Glob, Grep, Bash
-//! - Simple system prompt (no SOUL.md complexity)
+//! - Simple system prompt loaded from config/personalities/mrcode/
 
 mod loop_impl;
-mod prompts;
 
 use crate::agent::TurnResult;
 use crate::cli::Context;
 use crate::config::PermissionMode;
+use crate::personality::loader::{self, PersonalityConfig};
 use crate::personality::{Personality, PromptContext};
 use anyhow::Result;
 use serde_json::Value;
 
 /// MrCode personality - focused coding assistant
 pub struct MrCode {
-    /// Available tools for MrCode
+    /// Loaded configuration from files
+    config: PersonalityConfig,
+    /// Cached tools as static refs
     tools: Vec<&'static str>,
 }
 
 impl MrCode {
     /// Create a new MrCode personality
     pub fn new() -> Self {
-        Self {
-            tools: vec!["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Search"],
-        }
+        let config = loader::load_personality("mrcode")
+            .expect("Failed to load mrcode personality config");
+        let tools = config.tools_as_static();
+        Self { config, tools }
     }
 }
 
@@ -41,8 +44,12 @@ impl Personality for MrCode {
         "MrCode"
     }
 
+    fn config(&self) -> &PersonalityConfig {
+        &self.config
+    }
+
     fn build_system_prompt(&self, ctx: &PromptContext) -> String {
-        prompts::build_system_prompt(ctx)
+        loader::build_system_prompt(&self.config, ctx)
     }
 
     fn run_turn(
@@ -51,7 +58,7 @@ impl Personality for MrCode {
         user_input: &str,
         messages: &mut Vec<Value>,
     ) -> Result<TurnResult> {
-        loop_impl::run_turn(ctx, user_input, messages)
+        loop_impl::run_turn(&self.config, ctx, user_input, messages)
     }
 
     fn available_tools(&self) -> &[&str] {
@@ -59,7 +66,6 @@ impl Personality for MrCode {
     }
 
     fn permission_mode(&self) -> PermissionMode {
-        // MrCode uses default mode - asks for mutations and execution
-        PermissionMode::Default
+        self.config.permission_mode.clone()
     }
 }
