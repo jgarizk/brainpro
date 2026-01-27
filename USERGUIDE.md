@@ -133,31 +133,41 @@ This starts:
 
 Connect via WebSocket at `ws://localhost:18789`.
 
+### Agent State & Persistence
+
+Your agent maintains persistent state across restarts:
+
+| What Persists | Why It Matters |
+|---------------|----------------|
+| **Sessions** | Full conversation history - resume where you left off |
+| **Plans** | Saved implementation plans for review and iteration |
+| **Command history** | Arrow-key recall of past prompts (like bash history) |
+| **Metrics** | Token usage, costs, request counts over time |
+| **Local config** | Project-specific settings and permission rules |
+
+This state lives in a Docker volume (`brainpro-data`) that survives container rebuilds and upgrades. Your agent's "memory" is durable.
+
 ### Container Storage Model
 
-The container uses a read-only filesystem with specific writable mount points:
+The container runs read-only for security, with explicit writable paths:
 
-| Path | Type | Purpose |
-|------|------|---------|
-| `/app/workspace` | bind mount | User project files (Write tool operates here) |
-| `/app/data` | named volume | Sessions, plans, local config |
-| `/app/data/.brainpro` | named volume | metrics.json, yo_history |
-| `/app/logs` | named volume | Application logs |
-| `/run` | tmpfs | Unix sockets (brainpro.sock) |
-| `/var/run` | tmpfs | supervisor.sock |
-| `/var/log/supervisor` | tmpfs | Supervisor logs |
-| `/app/scratch` | tmpfs | Temporary validation files |
+| Path | Type | Contents |
+|------|------|----------|
+| `/app/workspace` | bind mount | Your project files (Write tool target) |
+| `/app/data` | volume | Agent state (sessions, plans, config, metrics) |
+| `/app/logs` | volume | Application logs |
+| `/run`, `/tmp` | tmpfs | Ephemeral runtime files |
 
-**Workspace Binding**: Mount your project directory to `/app/workspace`:
+**Workspace**: Mount your project to `/app/workspace`:
 
 ```yaml
 volumes:
   - ./my-project:/app/workspace
 ```
 
-The container's `working_dir` is `/app/workspace`, so all file operations happen relative to your mounted project.
+The container's working directory is `/app/workspace`, so file operations are relative to your project.
 
-**Secrets**: API keys are loaded via Docker secrets (12-factor pattern):
+**Secrets**: API keys load via Docker secrets (12-factor pattern):
 
 ```yaml
 secrets:
