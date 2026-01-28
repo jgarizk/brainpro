@@ -1,5 +1,6 @@
 """Execution modes and configuration for test harness."""
 
+import tempfile
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
@@ -52,7 +53,7 @@ class ModeConfig:
     @property
     def scratch_dir(self) -> Path:
         """Return path to scratch directory."""
-        return self.fixtures_dir / "scratch"
+        return Path(tempfile.gettempdir()) / "brainpro-test-scratch"
 
     @property
     def mock_webapp_dir(self) -> Path:
@@ -62,7 +63,7 @@ class ModeConfig:
     @property
     def mock_webapp_scratch(self) -> Path:
         """Return path to mock_webapp scratch copy."""
-        return self.fixtures_dir / "mock_webapp_scratch"
+        return Path(tempfile.gettempdir()) / "brainpro-mock-webapp-scratch"
 
     @property
     def results_dir(self) -> Path:

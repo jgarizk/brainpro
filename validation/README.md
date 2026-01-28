@@ -242,8 +242,8 @@ pytest -s  # Show all output
   - Validation bug: `@.` passes email validation
   - Undocumented functions in `handlers.rs`
   - One intentionally failing test
-- `fixtures/mock_webapp_scratch/` - Ephemeral copy for tests that mutate
-- `fixtures/scratch/` - Ephemeral directory for test artifacts
+- `/tmp/brainpro-mock-webapp-scratch/` - Ephemeral copy for tests that mutate
+- `/tmp/brainpro-test-scratch/` - Ephemeral directory for test artifacts
 - `fixtures/agents/` - Subagent configurations
 
 ## Troubleshooting

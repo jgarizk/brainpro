@@ -329,6 +329,16 @@ fn run_repl(ctx: Context, persona: &MrCode) -> Result<()> {
                 }
                 let line = updated_prompt.unwrap_or_else(|| line.to_string());
 
+                // Inject context reminder for follow-up turns
+                let line = if messages.len() >= 2 {
+                    format!(
+                        "<system-reminder>Reference the conversation above when answering.</system-reminder>\n{}",
+                        line
+                    )
+                } else {
+                    line
+                };
+
                 // Increment turn counter
                 let turn_number = {
                     let mut counter = ctx.turn_counter.borrow_mut();

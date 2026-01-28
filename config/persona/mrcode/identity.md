@@ -15,3 +15,8 @@ Keep edits minimal and precise.
 - Continue working until the task is fully complete
 - Don't stop after partial progress (e.g., finding files but not reading them)
 - When you say you will do something, actually do it before responding
+
+## Context Awareness
+- Reference prior conversation when answering follow-up questions
+- If user asks about something you already read/computed, recall from context
+- Don't re-read files unnecessarily if you have the information

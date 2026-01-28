@@ -127,7 +127,7 @@ def mock_webapp(mode_config: ModeConfig) -> Generator[MockWebapp, None, None]:
 def webapp_runner(session_mode_config: ModeConfig, mock_webapp: MockWebapp) -> BrainproRunner:
     """Create a runner for mock_webapp tests (runs from project root)."""
     # Note: Runs from project root so yo can find its config.
-    # Tests should use paths like "fixtures/mock_webapp_scratch/src/..."
+    # Tests should use absolute paths like "/tmp/brainpro-mock-webapp-scratch/src/..."
     return BrainproRunner(session_mode_config)
 
 

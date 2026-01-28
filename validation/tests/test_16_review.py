@@ -6,8 +6,8 @@ from harness.runner import BrainproRunner
 from harness.fixtures import MockWebapp
 from harness.assertions import assert_output_contains_any
 
-# Path prefix for mock_webapp_scratch from project root
-WEBAPP = "fixtures/mock_webapp_scratch"
+# Path to mock_webapp_scratch (now in /tmp)
+WEBAPP = "/tmp/brainpro-mock-webapp-scratch"
 
 
 class TestReview:

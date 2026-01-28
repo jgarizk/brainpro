@@ -12,8 +12,8 @@ from harness.assertions import (
     assert_cargo_test_passes,
 )
 
-# Path prefix for mock_webapp_scratch from project root
-WEBAPP = "fixtures/mock_webapp_scratch"
+# Path to mock_webapp_scratch (now in /tmp)
+WEBAPP = "/tmp/brainpro-mock-webapp-scratch"
 
 
 class TestTDD:
@@ -97,5 +97,5 @@ fn test_is_valid_username_char() {
             "is_strong_password",
         )
 
-        # Assert all tests pass
-        assert_cargo_test_passes(mock_webapp.path)
+        # Assert the new test passes (don't run full suite - pre-existing intentional failures)
+        assert_single_test_passes(mock_webapp.path, "test_is_strong_password")
