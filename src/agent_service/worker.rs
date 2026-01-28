@@ -5,7 +5,6 @@
 
 use crate::agent_service::turn_state::{PendingToolCall, TurnState, TurnStateStore};
 use crate::protocol::internal::{AgentEvent, AgentMethod, AgentRequest, UsageStats, YieldReason};
-use clap::Parser;
 use serde_json::{json, Value};
 use std::sync::{mpsc, Arc};
 
@@ -79,52 +78,20 @@ pub fn run_agent_task_with_config(
 
 /// Run a turn in non-gateway mode (original behavior)
 fn run_turn_task(request: AgentRequest, event_tx: mpsc::Sender<AgentEvent>) -> Result<(), String> {
-    use crate::backend::BackendRegistry;
-    use crate::cli::Context;
-    use crate::commands::CommandIndex;
-    use crate::config::{Config, Target};
-    use crate::cost::{PricingTable, SessionCosts};
-    use crate::hooks::HookManager;
-    use crate::model_routing::ModelRouter;
-    use crate::plan::PlanModeState;
-    use crate::policy::PolicyEngine;
-    use crate::skillpacks::{ActiveSkills, SkillIndex};
-    use crate::tools::todo::TodoState;
-    use crate::transcript::Transcript;
-    use crate::Args;
-    use std::cell::RefCell;
-    use std::path::PathBuf;
+    use crate::context_factory::{
+        build_context, load_config_with_defaults, parse_working_dir, resolve_target,
+    };
 
     let id = &request.id;
 
     // Parse working directory
-    let root = request
-        .working_dir
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let root = parse_working_dir(request.working_dir.as_ref());
 
-    // Load config
-    let mut cfg = Config::load().map_err(|e| format!("Config load failed: {}", e))?;
+    // Load config with defaults applied
+    let cfg = load_config_with_defaults()?;
 
-    // Apply default target based on available API keys (same logic as main.rs)
-    if cfg.default_target.is_none() {
-        if std::env::var("VENICE_API_KEY").is_ok() || std::env::var("venice_api_key").is_ok() {
-            cfg.default_target = Some("qwen3-235b-a22b-instruct-2507@venice".to_string());
-        } else if std::env::var("OPENAI_API_KEY").is_ok() {
-            cfg.default_target = Some("gpt-4o-mini@chatgpt".to_string());
-        } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-            cfg.default_target = Some("claude-3-5-sonnet-latest@claude".to_string());
-        }
-    }
-
-    // Parse target
-    let target = request
-        .target
-        .as_ref()
-        .and_then(|t| Target::parse(t))
-        .or_else(|| cfg.get_default_target());
-
+    // Resolve target
+    let target = resolve_target(request.target.as_ref(), &cfg);
     if target.is_none() {
         let _ = event_tx.send(AgentEvent::error(
             id,
@@ -134,56 +101,13 @@ fn run_turn_task(request: AgentRequest, event_tx: mpsc::Sender<AgentEvent>) -> R
         return Ok(());
     }
 
-    // Create minimal Args for the context
-    let args = Args::parse_from(["brainpro"]);
-
-    // Create transcript directory if needed
-    let transcripts_dir = root.join(".brainpro").join("sessions");
-    let _ = std::fs::create_dir_all(&transcripts_dir);
-
-    // Initialize transcript
-    let transcript_path = transcripts_dir.join(format!("{}.jsonl", request.session_id));
-    let transcript = match Transcript::new(&transcript_path, &request.session_id, &root) {
-        Ok(t) => t,
+    // Build context
+    let ctx = match build_context(&cfg, root, request.session_id.clone(), target) {
+        Ok(c) => c,
         Err(e) => {
-            let _ = event_tx.send(AgentEvent::error(
-                id,
-                "transcript_error",
-                &format!("Failed to create transcript: {}", e),
-            ));
+            let _ = event_tx.send(AgentEvent::error(id, "context_error", &e));
             return Ok(());
         }
-    };
-
-    // Initialize components
-    let policy = PolicyEngine::new(cfg.permissions.clone(), false, false);
-    let hooks = HookManager::new(cfg.hooks.clone(), request.session_id.clone(), root.clone());
-    let skill_index = SkillIndex::build(&root);
-    let model_router = ModelRouter::new(cfg.model_routing.clone());
-    let command_index = CommandIndex::build(&root);
-    let pricing = PricingTable::from_config(&cfg.model_pricing);
-    let session_costs = SessionCosts::new(request.session_id.clone(), pricing);
-
-    // Build context
-    let ctx = Context {
-        args,
-        root: root.clone(),
-        transcript: RefCell::new(transcript),
-        session_id: request.session_id.clone(),
-        tracing: RefCell::new(false),
-        config: RefCell::new(cfg.clone()),
-        backends: RefCell::new(BackendRegistry::new(&cfg)),
-        current_target: RefCell::new(target),
-        policy: RefCell::new(policy),
-        skill_index: RefCell::new(skill_index),
-        active_skills: RefCell::new(ActiveSkills::new()),
-        model_router: RefCell::new(model_router),
-        plan_mode: RefCell::new(PlanModeState::new()),
-        hooks: RefCell::new(hooks),
-        session_costs: RefCell::new(session_costs),
-        turn_counter: RefCell::new(0),
-        command_index: RefCell::new(command_index),
-        todo_state: RefCell::new(TodoState::new()),
     };
 
     // Convert request messages to mutable vec
@@ -269,53 +193,24 @@ fn run_turn_gateway_mode(
     event_tx: mpsc::Sender<AgentEvent>,
     config: &WorkerConfig,
 ) -> Result<(), String> {
-    use crate::backend::BackendRegistry;
-    use crate::cli::Context;
-    use crate::commands::CommandIndex;
-    use crate::config::{Config, Target};
-    use crate::cost::{PricingTable, SessionCosts};
-    use crate::hooks::HookManager;
+    use crate::context_factory::{
+        build_context, load_config_with_defaults, parse_working_dir, resolve_target,
+    };
     use crate::llm::{self, LlmClient};
-    use crate::model_routing::ModelRouter;
-    use crate::plan::PlanModeState;
-    use crate::policy::{Decision, PolicyEngine};
-    use crate::skillpacks::{ActiveSkills, SkillIndex};
-    use crate::tools::{self, todo::TodoState};
-    use crate::transcript::Transcript;
-    use crate::Args;
-    use std::cell::RefCell;
-    use std::path::PathBuf;
+    use crate::policy::Decision;
+    use crate::tools;
 
     let id = &request.id;
     let turn_id = uuid::Uuid::new_v4().to_string();
 
     // Parse working directory
-    let root = request
-        .working_dir
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let root = parse_working_dir(request.working_dir.as_ref());
 
-    // Load config
-    let mut cfg = Config::load().map_err(|e| format!("Config load failed: {}", e))?;
+    // Load config with defaults applied
+    let cfg = load_config_with_defaults()?;
 
-    // Apply default target
-    if cfg.default_target.is_none() {
-        if std::env::var("VENICE_API_KEY").is_ok() || std::env::var("venice_api_key").is_ok() {
-            cfg.default_target = Some("qwen3-235b-a22b-instruct-2507@venice".to_string());
-        } else if std::env::var("OPENAI_API_KEY").is_ok() {
-            cfg.default_target = Some("gpt-4o-mini@chatgpt".to_string());
-        } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-            cfg.default_target = Some("claude-3-5-sonnet-latest@claude".to_string());
-        }
-    }
-
-    let target = request
-        .target
-        .as_ref()
-        .and_then(|t| Target::parse(t))
-        .or_else(|| cfg.get_default_target());
-
+    // Resolve target
+    let target = resolve_target(request.target.as_ref(), &cfg);
     if target.is_none() {
         let _ = event_tx.send(AgentEvent::error(id, "no_target", "No target configured"));
         return Ok(());
@@ -352,48 +247,15 @@ Keep edits minimal and precise."#;
     let schema_opts = tools::SchemaOptions::new(false);
     let tool_schemas = tools::schemas_with_task(&schema_opts);
 
-    // Create transcript directory if needed
-    let transcripts_dir = root.join(".brainpro").join("sessions");
-    let _ = std::fs::create_dir_all(&transcripts_dir);
-
-    // Initialize transcript
-    let transcript_path = transcripts_dir.join(format!("{}.jsonl", request.session_id));
-    let transcript = Transcript::new(&transcript_path, &request.session_id, &root)
-        .map_err(|e| format!("Transcript error: {}", e))?;
-
-    // Policy engine - gateway mode doesn't auto-approve
-    let policy = PolicyEngine::new(cfg.permissions.clone(), false, false);
     let bash_config = cfg.bash.clone();
 
-    // Initialize other components
-    let hooks = HookManager::new(cfg.hooks.clone(), request.session_id.clone(), root.clone());
-    let skill_index = SkillIndex::build(&root);
-    let model_router = ModelRouter::new(cfg.model_routing.clone());
-    let command_index = CommandIndex::build(&root);
-    let pricing = PricingTable::from_config(&cfg.model_pricing);
-    let session_costs = SessionCosts::new(request.session_id.clone(), pricing);
-    let args = Args::parse_from(["brainpro"]);
-
     // Build context for tool execution
-    let ctx = Context {
-        args,
-        root: root.clone(),
-        transcript: RefCell::new(transcript),
-        session_id: request.session_id.clone(),
-        tracing: RefCell::new(false),
-        config: RefCell::new(cfg.clone()),
-        backends: RefCell::new(BackendRegistry::new(&cfg)),
-        current_target: RefCell::new(Some(target.clone())),
-        policy: RefCell::new(policy),
-        skill_index: RefCell::new(skill_index),
-        active_skills: RefCell::new(ActiveSkills::new()),
-        model_router: RefCell::new(model_router),
-        plan_mode: RefCell::new(PlanModeState::new()),
-        hooks: RefCell::new(hooks),
-        session_costs: RefCell::new(session_costs),
-        turn_counter: RefCell::new(0),
-        command_index: RefCell::new(command_index),
-        todo_state: RefCell::new(TodoState::new()),
+    let ctx = match build_context(&cfg, root.clone(), request.session_id.clone(), Some(target.clone())) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = event_tx.send(AgentEvent::error(id, "context_error", &e));
+            return Ok(());
+        }
     };
 
     // Build messages for LLM
@@ -651,22 +513,12 @@ fn run_resume_task(
     event_tx: mpsc::Sender<AgentEvent>,
     config: &WorkerConfig,
 ) -> Result<(), String> {
-    use crate::backend::BackendRegistry;
-    use crate::cli::Context;
-    use crate::commands::CommandIndex;
-    use crate::config::{Config, Target};
-    use crate::cost::{PricingTable, SessionCosts};
-    use crate::hooks::HookManager;
+    use crate::context_factory::{
+        build_context, load_config_with_defaults, parse_working_dir, resolve_target,
+    };
     use crate::llm::{self, LlmClient};
-    use crate::model_routing::ModelRouter;
-    use crate::plan::PlanModeState;
-    use crate::policy::{Decision, PolicyEngine};
-    use crate::skillpacks::{ActiveSkills, SkillIndex};
-    use crate::tools::{self, todo::TodoState};
-    use crate::transcript::Transcript;
-    use crate::Args;
-    use std::cell::RefCell;
-    use std::path::PathBuf;
+    use crate::policy::Decision;
+    use crate::tools;
 
     let id = &request.id;
 
@@ -701,32 +553,13 @@ fn run_resume_task(
     let _turn_id = state.turn_id.clone();
 
     // Parse working directory
-    let root = state
-        .working_dir
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let root = parse_working_dir(state.working_dir.as_ref());
 
-    // Load config
-    let mut cfg = Config::load().map_err(|e| format!("Config load failed: {}", e))?;
+    // Load config with defaults applied
+    let cfg = load_config_with_defaults()?;
 
-    // Apply default target
-    if cfg.default_target.is_none() {
-        if std::env::var("VENICE_API_KEY").is_ok() || std::env::var("venice_api_key").is_ok() {
-            cfg.default_target = Some("qwen3-235b-a22b-instruct-2507@venice".to_string());
-        } else if std::env::var("OPENAI_API_KEY").is_ok() {
-            cfg.default_target = Some("gpt-4o-mini@chatgpt".to_string());
-        } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-            cfg.default_target = Some("claude-3-5-sonnet-latest@claude".to_string());
-        }
-    }
-
-    let target = state
-        .target
-        .as_ref()
-        .and_then(|t| Target::parse(t))
-        .or_else(|| cfg.get_default_target());
-
+    // Resolve target
+    let target = resolve_target(state.target.as_ref(), &cfg);
     if target.is_none() {
         let _ = event_tx.send(AgentEvent::error(id, "no_target", "No target configured"));
         return Ok(());
@@ -747,47 +580,13 @@ Keep edits minimal and precise."#;
     let schema_opts = tools::SchemaOptions::new(false);
     let tool_schemas = tools::schemas_with_task(&schema_opts);
 
-    // Create transcript directory if needed
-    let transcripts_dir = root.join(".brainpro").join("sessions");
-    let _ = std::fs::create_dir_all(&transcripts_dir);
-
-    // Initialize transcript
-    let transcript_path = transcripts_dir.join(format!("{}.jsonl", state.session_id));
-    let transcript = Transcript::new(&transcript_path, &state.session_id, &root)
-        .map_err(|e| format!("Transcript error: {}", e))?;
-
-    // Policy engine
-    let policy = PolicyEngine::new(cfg.permissions.clone(), false, false);
-
-    // Initialize other components
-    let hooks = HookManager::new(cfg.hooks.clone(), state.session_id.clone(), root.clone());
-    let skill_index = SkillIndex::build(&root);
-    let model_router = ModelRouter::new(cfg.model_routing.clone());
-    let command_index = CommandIndex::build(&root);
-    let pricing = PricingTable::from_config(&cfg.model_pricing);
-    let session_costs = SessionCosts::new(state.session_id.clone(), pricing);
-    let args = Args::parse_from(["brainpro"]);
-
     // Build context
-    let ctx = Context {
-        args,
-        root: root.clone(),
-        transcript: RefCell::new(transcript),
-        session_id: state.session_id.clone(),
-        tracing: RefCell::new(false),
-        config: RefCell::new(cfg.clone()),
-        backends: RefCell::new(BackendRegistry::new(&cfg)),
-        current_target: RefCell::new(Some(target.clone())),
-        policy: RefCell::new(policy),
-        skill_index: RefCell::new(skill_index),
-        active_skills: RefCell::new(ActiveSkills::new()),
-        model_router: RefCell::new(model_router),
-        plan_mode: RefCell::new(PlanModeState::new()),
-        hooks: RefCell::new(hooks),
-        session_costs: RefCell::new(session_costs),
-        turn_counter: RefCell::new(0),
-        command_index: RefCell::new(command_index),
-        todo_state: RefCell::new(TodoState::new()),
+    let ctx = match build_context(&cfg, root.clone(), state.session_id.clone(), Some(target.clone())) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = event_tx.send(AgentEvent::error(id, "context_error", &e));
+            return Ok(());
+        }
     };
 
     // Restore messages
@@ -1090,62 +889,7 @@ fn execute_tool(
     args: Value,
     bash_config: &crate::config::BashConfig,
 ) -> Result<Value, String> {
-    use crate::tools;
-
-    // Handle special tools
-    if name == "ActivateSkill" {
-        let skill_name = args["name"].as_str().unwrap_or("");
-        let reason = args["reason"].as_str();
-
-        if skill_name.is_empty() {
-            return Ok(json!({
-                "error": {
-                    "code": "missing_name",
-                    "message": "Missing required 'name' parameter"
-                }
-            }));
-        }
-
-        let skill_index = ctx.skill_index.borrow();
-        let mut active_skills = ctx.active_skills.borrow_mut();
-        match active_skills.activate(skill_name, &skill_index) {
-            Ok(activation) => {
-                let _ = ctx.transcript.borrow_mut().skill_activate(
-                    &activation.name,
-                    reason,
-                    activation.allowed_tools.as_ref(),
-                );
-                Ok(json!({
-                    "ok": true,
-                    "name": activation.name,
-                    "description": activation.description,
-                    "allowed_tools": activation.allowed_tools,
-                    "instructions_loaded": true,
-                    "message": format!("Skill '{}' activated. Instructions loaded.", activation.name)
-                }))
-            }
-            Err(e) => Ok(json!({
-                "error": {
-                    "code": "activation_failed",
-                    "message": e.to_string()
-                }
-            })),
-        }
-    } else if name == "Task" {
-        let (task_result, _sub_stats) =
-            tools::task::execute(args.clone(), ctx).map_err(|e| format!("Task error: {}", e))?;
-        Ok(task_result)
-    } else if name == "TodoWrite" {
-        Ok(tools::todo::execute(args, &ctx.todo_state))
-    } else if name == "EnterPlanMode" {
-        let goal = args.get("goal").and_then(|g| g.as_str()).unwrap_or("");
-        Ok(tools::plan_mode::execute_enter(&ctx.plan_mode, goal))
-    } else if name == "ExitPlanMode" {
-        Ok(tools::plan_mode::execute_exit(&ctx.plan_mode))
-    } else {
-        // Execute built-in tool
-        tools::execute(name, args, &ctx.root, bash_config).map_err(|e| format!("Tool error: {}", e))
-    }
+    crate::agent::execute_simple(ctx, name, args, bash_config)
 }
 
 /// Spawn a worker task in a new thread

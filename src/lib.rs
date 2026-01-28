@@ -4,8 +4,10 @@
 //! gateway, and agent daemon.
 
 pub mod agent;
+mod agent_impl;
 pub mod agent_service;
 pub mod backend;
+pub mod context_factory;
 pub mod circuit_breaker;
 pub mod cli;
 pub mod commands;

@@ -112,6 +112,33 @@ pub struct Args {
     pub gateway: Option<String>,
 }
 
+impl Default for Args {
+    fn default() -> Self {
+        Self {
+            prompt: None,
+            api_key: None,
+            base_url: "https://api.venice.ai/api/v1".to_string(),
+            model: "qwen3-235b-a22b-instruct-2507".to_string(),
+            yes: false,
+            transcripts_dir: None,
+            trace: false,
+            config: None,
+            target: None,
+            list_targets: false,
+            mode: None,
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+            ask_tools: Vec::new(),
+            max_turns: None,
+            verbose: false,
+            debug: false,
+            optimize: false,
+            resume: None,
+            gateway: None,
+        }
+    }
+}
+
 /// Get the path to the history file
 fn history_path() -> PathBuf {
     dirs::home_dir()

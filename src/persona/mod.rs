@@ -4,6 +4,7 @@
 //! - MrCode: Direct CLI, focused coding assistant with minimal toolset
 //! - MrBot: Gateway/Docker path, conversational bot with SOUL.md support
 
+pub mod hooks;
 pub mod loader;
 pub mod mrbot;
 pub mod mrcode;
