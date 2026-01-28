@@ -5,4 +5,5 @@
 
 pub mod agent_conn;
 pub mod client_mgr;
+pub mod lanes;
 pub mod server;

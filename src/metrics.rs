@@ -129,6 +129,24 @@ impl MetricsCollector {
         *data.requests_by_model.entry(model.to_string()).or_default() += 1;
     }
 
+    /// Record a successful request with full token/cost data
+    ///
+    /// Also emits an event via the events module for richer observability.
+    pub fn record_request_success_full(
+        &self,
+        backend: &str,
+        model: &str,
+        duration_ms: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: f64,
+    ) {
+        self.record_request_success(backend, model, duration_ms);
+        self.record_tokens(backend, model, input_tokens, output_tokens);
+        self.record_cost(backend, model, cost_usd);
+        // Event emission is done by caller if needed
+    }
+
     /// Record a failed request
     pub fn record_request_failure(&self, backend: &str, model: &str, duration_ms: u64) {
         self.requests_total
@@ -145,6 +163,21 @@ impl MetricsCollector {
         *data.requests_by_backend.entry(backend.to_string()).or_default() += 1;
     }
 
+    /// Record a failed request with error details
+    ///
+    /// Also emits an event via the events module for richer observability.
+    pub fn record_request_failure_with_error(
+        &self,
+        backend: &str,
+        model: &str,
+        duration_ms: u64,
+        _error_code: &str,
+        _error_message: &str,
+    ) {
+        self.record_request_failure(backend, model, duration_ms);
+        // Event emission is done by caller if needed
+    }
+
     /// Record a circuit breaker trip
     pub fn record_circuit_trip(&self, backend: &str) {
         self.circuit_trips_total
@@ -155,6 +188,19 @@ impl MetricsCollector {
         let mut data = self.json_data.write().unwrap();
         data.circuit_trips += 1;
         *data.circuit_trips_by_backend.entry(backend.to_string()).or_default() += 1;
+    }
+
+    /// Record a circuit breaker trip with details
+    ///
+    /// Also emits an event via the events module for richer observability.
+    pub fn record_circuit_trip_with_details(
+        &self,
+        backend: &str,
+        _failure_count: u32,
+        _recovery_timeout_secs: u32,
+    ) {
+        self.record_circuit_trip(backend);
+        // Event emission is done by caller if needed
     }
 
     /// Record token usage

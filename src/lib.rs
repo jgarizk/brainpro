@@ -5,6 +5,7 @@
 
 pub mod agent;
 mod agent_impl;
+pub mod agent_policy;
 pub mod agent_service;
 pub mod backend;
 pub mod context_factory;
@@ -14,6 +15,7 @@ pub mod commands;
 pub mod compact;
 pub mod config;
 pub mod cost;
+pub mod events;
 pub mod gateway;
 pub mod gateway_client;
 pub mod hooks;

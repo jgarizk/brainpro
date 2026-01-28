@@ -219,7 +219,8 @@ impl SessionCosts {
 /// Pricing table with model-specific costs
 #[derive(Debug, Clone)]
 pub struct PricingTable {
-    models: HashMap<String, ModelPricing>,
+    /// Model pricing map (public for vendor integrations)
+    pub models: HashMap<String, ModelPricing>,
     default_pricing: ModelPricing,
 }
 
