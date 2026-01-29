@@ -1,4 +1,7 @@
-# brainpro<img width="470" height="420" alt="{CC2FBA1C-F12A-474A-AA0F-952C240874E8}" src="https://github.com/user-attachments/assets/deccb357-55fe-4e3a-831e-9909f5f7f443" />
+# brainpro
+
+<img width="470" height="420" alt="{CC2FBA1C-F12A-474A-AA0F-952C240874E8}" src="https://github.com/user-attachments/assets/51b8c5aa-8bea-465c-b774-550d347eb52d" />
+
 
 
 A local agentic coding assistant. Vendor-neutral, multi-model routing—send coding to Claude, planning to Qwen, exploration to GPT.
